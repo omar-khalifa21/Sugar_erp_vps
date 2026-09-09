@@ -1,0 +1,116 @@
+name: sugar-erp-dev
+
+services:
+  postgres:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sugar_erp}
+      POSTGRES_USER: ${POSTGRES_USER:-sugar_erp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-development-password}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5434}:5432"
+    volumes:
+      - sugar-postgres-dev:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    networks: [backend]
+
+  migrate:
+    build:
+      context: .
+      target: development
+    command: npm run prisma:migrate:deploy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sugar_erp}:${POSTGRES_PASSWORD:-local-development-password}@postgres:5432/${POSTGRES_DB:-sugar_erp}?schema=public
+      JWT_SECRET: ${JWT_SECRET:-local-development-only-key-not-a-secret}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [backend]
+    restart: "no"
+
+  seed:
+    build:
+      context: .
+      target: development
+    command: npm run seed:dev
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sugar_erp}:${POSTGRES_PASSWORD:-local-development-password}@postgres:5432/${POSTGRES_DB:-sugar_erp}?schema=public
+      DEV_ADMIN_USERNAME: ${DEV_ADMIN_USERNAME:-admin}
+      DEV_ADMIN_PASSWORD: ${DEV_ADMIN_PASSWORD:-SugarAdmin2026!}
+      DEV_SEED_SYNTHETIC: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks: [backend]
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      target: development
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sugar_erp}:${POSTGRES_PASSWORD:-local-development-password}@postgres:5432/${POSTGRES_DB:-sugar_erp}?schema=public
+      JWT_SECRET: ${JWT_SECRET:-local-development-only-key-not-a-secret}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-15m}
+      PORT: 3000
+    ports:
+      - "127.0.0.1:${API_PORT:-3000}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      seed:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/v1/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    networks: [backend]
+
+  admin-web:
+    build:
+      context: .
+      target: development
+    command: npm run dev --workspace @sugar-erp/admin-web
+    environment:
+      VITE_API_PROXY_TARGET: http://api:3000
+      VITE_SHOW_DEMO_CREDENTIALS: "true"
+    ports:
+      - "127.0.0.1:${ADMIN_WEB_PORT:-4173}:4173"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [backend]
+
+  api-test:
+    profiles: [test]
+    build:
+      context: .
+      target: development
+    command: npm run test:integration
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sugar_erp}:${POSTGRES_PASSWORD:-local-development-password}@postgres:5432/${POSTGRES_DB:-sugar_erp}?schema=public
+      JWT_SECRET: ${JWT_SECRET:-local-development-only-key-not-a-secret}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks: [backend]
+
+volumes:
+  sugar-postgres-dev:
+
+networks:
+  backend:
+    driver: bridge
