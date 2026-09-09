@@ -1,5 +1,5 @@
 import { ItemKind } from '@prisma/client';
-import { IsEnum, IsInt, IsString, Length, Min } from 'class-validator';
+import { IsEnum, IsInt, IsOptional, IsString, Length, Max, Min } from 'class-validator';
 
 export class CreateItemDto {
   @IsString()
@@ -17,6 +17,12 @@ export class CreateItemDto {
   @IsInt()
   @Min(1)
   quantityScale!: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(2_000_000_000)
+  retailPriceMinor?: number;
 
   @IsEnum(ItemKind)
   kind!: ItemKind;

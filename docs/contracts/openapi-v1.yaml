@@ -1,0 +1,117 @@
+openapi: 3.1.0
+info:
+  title: Sugar ERP API
+  version: 1.0.0
+servers:
+  - url: /api/v1
+paths:
+  /health:
+    get:
+      security: []
+      responses:
+        '200': { description: Process is alive }
+  /ready:
+    get:
+      security: []
+      responses:
+        '200': { description: Database and migrations are ready }
+  /auth/login:
+    post:
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string, format: password }
+      responses:
+        '201': { description: Bearer access token }
+        '401': { $ref: '#/components/responses/Error' }
+  /sites/{siteId}/enrollment-tokens:
+    post:
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: siteId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '201': { description: Single-use token returned once }
+        '403': { $ref: '#/components/responses/Error' }
+  /enrollment:
+    post:
+      security: []
+      responses:
+        '201': { description: Enrolled device and credential returned once }
+        '409': { $ref: '#/components/responses/Error' }
+  /sync/push:
+    post:
+      security: [{ deviceId: [], deviceSecret: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contract_version, stream_epoch, events]
+              properties:
+                contract_version: { const: '1.0' }
+                stream_epoch: { type: integer, minimum: 1 }
+                events:
+                  type: array
+                  maxItems: 100
+                  items: { $ref: '#/components/schemas/EventEnvelope' }
+      responses:
+        '200': { description: Atomic batch result }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /sync/pull:
+    get:
+      security: [{ deviceId: [], deviceSecret: [] }]
+      parameters:
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+      responses:
+        '200': { description: Permission-scoped ordered event page }
+  /sync/ack:
+    post:
+      security: [{ deviceId: [], deviceSecret: [] }]
+      responses:
+        '200': { description: Cursor acknowledged monotonically }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+    deviceId: { type: apiKey, in: header, name: X-Device-Id }
+    deviceSecret: { type: apiKey, in: header, name: X-Device-Secret }
+  schemas:
+    EventEnvelope:
+      type: object
+      additionalProperties: false
+      required: [id, device_sequence, event_type, schema_version, occurred_at, payload, content_hash]
+      properties:
+        id: { type: string, format: uuid }
+        device_sequence: { type: integer, minimum: 1 }
+        event_type: { type: string, pattern: '^[a-z][a-z0-9_.-]{2,119}$' }
+        schema_version: { type: integer, minimum: 1 }
+        occurred_at: { type: string, format: date-time }
+        payload: { type: object }
+        dependencies: { type: array, maxItems: 50, items: { type: string, format: uuid } }
+        content_hash: { type: string, pattern: '^[0-9a-f]{64}$' }
+    ApiError:
+      type: object
+      required: [code, message, correlation_id, retryable]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        correlation_id: { type: string }
+        retryable: { type: boolean }
+        field_errors: { type: array, items: { type: string } }
+        current_version: { type: integer }
+        expected_sequence: { type: integer }
+  responses:
+    Error:
+      description: Stable API error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ApiError' }

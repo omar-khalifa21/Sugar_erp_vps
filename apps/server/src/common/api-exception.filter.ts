@@ -11,6 +11,9 @@ interface ValidationBody {
   message?: string | string[];
   error?: string;
   code?: string;
+  retryable?: boolean;
+  current_version?: number;
+  expected_sequence?: number;
 }
 
 @Catch()
@@ -35,8 +38,12 @@ export class ApiExceptionFilter implements ExceptionFilter {
       code: body.code || this.codeFor(status),
       message: safeMessage,
       correlation_id: String(response.locals.correlationId),
-      retryable: status >= 500,
+      retryable: body.retryable ?? status >= 500,
       ...(messages ? { field_errors: messages } : {}),
+      ...(body.current_version !== undefined ? { current_version: body.current_version } : {}),
+      ...(body.expected_sequence !== undefined
+        ? { expected_sequence: body.expected_sequence }
+        : {}),
       path: request.originalUrl,
     });
   }

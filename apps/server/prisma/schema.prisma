@@ -30,6 +30,46 @@ enum ItemKind {
   INGREDIENT
 }
 
+enum StockLocation {
+  SALEABLE
+  FREEZER
+  DISPLAY
+  KITCHEN
+  HOLD
+  TRANSIT
+}
+
+enum ShiftKind {
+  MORNING
+  EVENING
+}
+
+enum AdjustmentStatus {
+  PENDING_SITE_APPLY
+  APPLIED
+  REJECTED
+}
+
+enum CafeInvoiceStatus {
+  OPEN
+  PARTIALLY_PAID
+  PAID
+  REVERSED
+}
+
+enum ConflictStatus {
+  OPEN
+  PENDING_SITE_APPLY
+  RESOLVED
+}
+
+enum DecisionApplicationStatus {
+  CREATED
+  DELIVERED
+  APPLIED
+  REJECTED
+}
+
 model Site {
   id        String         @id @default(uuid()) @db.Uuid
   code      String         @unique @db.VarChar(50)
@@ -41,6 +81,15 @@ model Site {
   updatedAt DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
   devices   Device[]
   userRoles UserSiteRole[]
+  enrollmentTokens EnrollmentToken[]
+  syncEvents SyncEvent[]
+  stockBalances StockBalance[]
+  retailSales RetailSale[]
+  stockAdjustments StockAdjustment[]
+  cafeInvoices CafeInvoice[] @relation("CafeInvoiceSite")
+  collectedCafePayments CafePayment[] @relation("CafePaymentCollectionSite")
+  quantityConflicts QuantityConflict[]
+  ingredientVariances IngredientVariance[]
 
   @@map("sites")
 }
@@ -55,9 +104,14 @@ model Device {
   lastSeenAt       DateTime?        @map("last_seen_at") @db.Timestamptz(6)
   appVersion       String?          @map("app_version") @db.VarChar(50)
   streamEpoch      Int              @default(1) @map("stream_epoch")
+  name             String?          @db.VarChar(120)
+  credentialHash   String?          @unique @map("credential_hash") @db.Char(64)
   createdAt        DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt        DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
   site             Site             @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  syncState        DeviceSyncState?
+  syncCursor       DeviceSyncCursor?
+  syncEvents       SyncEvent[]
 
   @@index([siteId])
   @@map("devices")
@@ -72,6 +126,8 @@ model User {
   createdAt    DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt    DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
   siteRoles    UserSiteRole[]
+  stockAdjustments StockAdjustment[]
+  adminDecisions AdminDecision[]
 
   @@map("users")
 }
@@ -81,6 +137,7 @@ model Role {
   code        String         @unique @db.VarChar(50)
   name        String         @db.VarChar(100)
   permissions String[]       @default([])
+  active      Boolean        @default(true)
   createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
   userRoles   UserSiteRole[]
 
@@ -109,11 +166,337 @@ model Item {
   nameAr        String   @map("name_ar") @db.VarChar(300)
   unit          String   @db.VarChar(30)
   quantityScale Int      @map("quantity_scale")
+  retailPriceMinor Int   @default(0) @map("retail_price_minor")
   kind          ItemKind
   active        Boolean  @default(true)
   version       Int      @default(1)
   createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  stockBalances StockBalance[]
+  stockAdjustments StockAdjustment[]
+  conflictLines ConflictLine[]
+  ingredientVariances IngredientVariance[]
+  retailPriceRevisions RetailPriceRevision[]
+  cafePrices CafeItemPrice[]
+  cafePriceRevisions CafePriceRevision[]
+  cafeInvoiceLines CafeInvoiceLine[]
 
   @@map("items")
+}
+
+model RetailPriceRevision {
+  id          String   @id @default(uuid()) @db.Uuid
+  itemId      String   @map("item_id") @db.Uuid
+  priceMinor  Int      @map("price_minor")
+  version     Int
+  effectiveAt DateTime @default(now()) @map("effective_at") @db.Timestamptz(6)
+  item        Item     @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  @@unique([itemId, version])
+  @@index([itemId, effectiveAt])
+  @@map("retail_price_revisions")
+}
+
+model EnrollmentToken {
+  id              String        @id @default(uuid()) @db.Uuid
+  siteId          String        @map("site_id") @db.Uuid
+  profile         DeviceProfile
+  tokenHash       String        @unique @map("token_hash") @db.Char(64)
+  expiresAt       DateTime      @map("expires_at") @db.Timestamptz(6)
+  usedAt          DateTime?     @map("used_at") @db.Timestamptz(6)
+  usedByDeviceId  String?       @map("used_by_device_id") @db.Uuid
+  createdByUserId String        @map("created_by_user_id") @db.Uuid
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  site            Site          @relation(fields: [siteId], references: [id], onDelete: Restrict)
+
+  @@index([siteId, expiresAt])
+  @@map("enrollment_tokens")
+}
+
+model DeviceSyncState {
+  deviceId             String   @id @map("device_id") @db.Uuid
+  nextExpectedSequence Int      @default(1) @map("next_expected_sequence")
+  lastAcceptedAt       DateTime? @map("last_accepted_at") @db.Timestamptz(6)
+  updatedAt            DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  device               Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@map("device_sync_states")
+}
+
+model DeviceSyncCursor {
+  deviceId            String   @id @map("device_id") @db.Uuid
+  lastServerPosition  BigInt   @default(0) @map("last_server_position")
+  acknowledgedAt      DateTime @default(now()) @map("acknowledged_at") @db.Timestamptz(6)
+  device              Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@map("device_sync_cursors")
+}
+
+model SyncEvent {
+  id              String   @id @db.Uuid
+  deviceId        String   @map("device_id") @db.Uuid
+  siteId          String   @map("site_id") @db.Uuid
+  streamEpoch     Int      @map("stream_epoch")
+  deviceSequence  Int      @map("device_sequence")
+  eventType       String   @map("event_type") @db.VarChar(120)
+  schemaVersion   Int      @map("schema_version")
+  occurredAt      DateTime @map("occurred_at") @db.Timestamptz(6)
+  receivedAt      DateTime @default(now()) @map("received_at") @db.Timestamptz(6)
+  payload         Json
+  dependencies    Json     @default("[]")
+  contentHash     String   @map("content_hash") @db.Char(64)
+  serverPosition  BigInt   @unique @default(autoincrement()) @map("server_position")
+  device          Device   @relation(fields: [deviceId], references: [id], onDelete: Restrict)
+  site            Site     @relation(fields: [siteId], references: [id], onDelete: Restrict)
+
+  @@unique([deviceId, streamEpoch, deviceSequence])
+  @@index([siteId, serverPosition])
+  @@index([eventType, occurredAt])
+  @@map("sync_events")
+}
+
+model StockBalance {
+  id             String        @id @default(uuid()) @db.Uuid
+  siteId         String        @map("site_id") @db.Uuid
+  itemId         String        @map("item_id") @db.Uuid
+  location       StockLocation
+  quantityScaled BigInt        @map("quantity_scaled")
+  asOfAt         DateTime      @map("as_of_at") @db.Timestamptz(6)
+  version        Int           @default(1)
+  sourceEventId  String?       @map("source_event_id") @db.Uuid
+  site           Site          @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  item           Item          @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  @@unique([siteId, itemId, location])
+  @@index([siteId, asOfAt])
+  @@map("stock_balances")
+}
+
+model RetailSale {
+  id            String    @id @default(uuid()) @db.Uuid
+  siteId        String    @map("site_id") @db.Uuid
+  receiptNumber String    @map("receipt_number") @db.VarChar(100)
+  businessDate  DateTime  @map("business_date") @db.Date
+  shiftKind     ShiftKind @map("shift_kind")
+  netMinor      BigInt    @map("net_minor")
+  tipMinor      BigInt    @default(0) @map("tip_minor")
+  occurredAt    DateTime  @map("occurred_at") @db.Timestamptz(6)
+  sourceEventId String?   @unique @map("source_event_id") @db.Uuid
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  site          Site      @relation(fields: [siteId], references: [id], onDelete: Restrict)
+
+  @@unique([siteId, receiptNumber])
+  @@index([siteId, businessDate])
+  @@map("retail_sales")
+}
+
+model StockAdjustment {
+  id              String           @id @default(uuid()) @db.Uuid
+  siteId          String           @map("site_id") @db.Uuid
+  itemId          String           @map("item_id") @db.Uuid
+  location        StockLocation
+  deltaScaled     BigInt           @map("delta_scaled")
+  reason          String           @db.VarChar(500)
+  expectedVersion Int              @map("expected_version")
+  status          AdjustmentStatus @default(PENDING_SITE_APPLY)
+  createdByUserId String           @map("created_by_user_id") @db.Uuid
+  createdAt       DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  appliedAt       DateTime?        @map("applied_at") @db.Timestamptz(6)
+  site            Site             @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  item            Item             @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  createdBy       User             @relation(fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  @@index([siteId, status, createdAt])
+  @@map("stock_adjustments")
+}
+
+model CafeCustomer {
+  id        String        @id @default(uuid()) @db.Uuid
+  code      String        @unique @db.VarChar(50)
+  name      String        @db.VarChar(200)
+  contact   String?       @db.VarChar(200)
+  notes     String?       @db.VarChar(500)
+  active    Boolean       @default(true)
+  createdAt DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+  invoices  CafeInvoice[]
+  payments  CafePayment[]
+  prices    CafeItemPrice[]
+  priceRevisions CafePriceRevision[]
+
+  @@map("cafe_customers")
+}
+
+model CafeItemPrice {
+  id          String       @id @default(uuid()) @db.Uuid
+  customerId  String       @map("customer_id") @db.Uuid
+  itemId      String       @map("item_id") @db.Uuid
+  priceMinor  Int          @map("price_minor")
+  version     Int          @default(1)
+  updatedAt   DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
+  customer    CafeCustomer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  item        Item         @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  revisions   CafePriceRevision[]
+
+  @@unique([customerId, itemId])
+  @@index([itemId])
+  @@map("cafe_item_prices")
+}
+
+model CafePriceRevision {
+  id          String        @id @default(uuid()) @db.Uuid
+  cafePriceId String        @map("cafe_price_id") @db.Uuid
+  customerId  String        @map("customer_id") @db.Uuid
+  itemId      String        @map("item_id") @db.Uuid
+  priceMinor  Int           @map("price_minor")
+  version     Int
+  effectiveAt DateTime      @default(now()) @map("effective_at") @db.Timestamptz(6)
+  cafePrice   CafeItemPrice @relation(fields: [cafePriceId], references: [id], onDelete: Restrict)
+  customer    CafeCustomer  @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  item        Item          @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  @@unique([cafePriceId, version])
+  @@index([customerId, itemId, effectiveAt])
+  @@map("cafe_price_revisions")
+}
+
+model CafeInvoice {
+  id            String            @id @default(uuid()) @db.Uuid
+  customerId    String            @map("customer_id") @db.Uuid
+  issuingSiteId String            @map("issuing_site_id") @db.Uuid
+  invoiceNumber String            @map("invoice_number") @db.VarChar(100)
+  businessDate  DateTime          @map("business_date") @db.Date
+  netMinor      BigInt            @map("net_minor")
+  status        CafeInvoiceStatus @default(OPEN)
+  occurredAt    DateTime          @map("occurred_at") @db.Timestamptz(6)
+  sourceEventId String?           @unique @map("source_event_id") @db.Uuid
+  createdAt     DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  customer      CafeCustomer      @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  issuingSite   Site              @relation("CafeInvoiceSite", fields: [issuingSiteId], references: [id], onDelete: Restrict)
+  allocations   CafePaymentAllocation[]
+  lines         CafeInvoiceLine[]
+
+  @@unique([issuingSiteId, invoiceNumber])
+  @@index([customerId, status, businessDate])
+  @@map("cafe_invoices")
+}
+
+model CafeInvoiceLine {
+  id                String      @id @default(uuid()) @db.Uuid
+  invoiceId         String      @map("invoice_id") @db.Uuid
+  itemId            String      @map("item_id") @db.Uuid
+  quantityScaled    BigInt      @map("quantity_scaled")
+  quantityScale     Int         @map("quantity_scale")
+  unitPriceMinor    Int         @map("unit_price_minor")
+  totalMinor        BigInt      @map("total_minor")
+  itemNameSnapshot  String      @map("item_name_snapshot") @db.VarChar(300)
+  skuSnapshot       String      @map("sku_snapshot") @db.VarChar(100)
+  unitSnapshot      String      @map("unit_snapshot") @db.VarChar(30)
+  invoice           CafeInvoice @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  item              Item        @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  @@unique([invoiceId, itemId])
+  @@index([itemId])
+  @@map("cafe_invoice_lines")
+}
+
+model CafePayment {
+  id                  String      @id @default(uuid()) @db.Uuid
+  customerId          String      @map("customer_id") @db.Uuid
+  collectedAtSiteId   String      @map("collected_at_site_id") @db.Uuid
+  reference           String      @unique @db.VarChar(100)
+  amountMinor         BigInt      @map("amount_minor")
+  occurredAt          DateTime    @map("occurred_at") @db.Timestamptz(6)
+  reversedAt          DateTime?   @map("reversed_at") @db.Timestamptz(6)
+  sourceEventId       String?     @unique @map("source_event_id") @db.Uuid
+  createdAt           DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  customer            CafeCustomer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  collectedAtSite     Site        @relation("CafePaymentCollectionSite", fields: [collectedAtSiteId], references: [id], onDelete: Restrict)
+  allocations         CafePaymentAllocation[]
+
+  @@index([customerId, occurredAt])
+  @@map("cafe_payments")
+}
+
+model CafePaymentAllocation {
+  id          String      @id @default(uuid()) @db.Uuid
+  paymentId   String      @map("payment_id") @db.Uuid
+  invoiceId   String      @map("invoice_id") @db.Uuid
+  amountMinor BigInt      @map("amount_minor")
+  createdAt   DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  payment     CafePayment @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  invoice     CafeInvoice @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+
+  @@unique([paymentId, invoiceId])
+  @@index([invoiceId])
+  @@map("cafe_payment_allocations")
+}
+
+model QuantityConflict {
+  id             String         @id @default(uuid()) @db.Uuid
+  siteId         String         @map("site_id") @db.Uuid
+  reference      String         @db.VarChar(120)
+  status         ConflictStatus @default(OPEN)
+  version        Int            @default(1)
+  note           String?        @db.VarChar(500)
+  sentAt         DateTime       @map("sent_at") @db.Timestamptz(6)
+  countedAt      DateTime       @map("counted_at") @db.Timestamptz(6)
+  reportedAt     DateTime       @default(now()) @map("reported_at") @db.Timestamptz(6)
+  sourceEventId  String?        @unique @map("source_event_id") @db.Uuid
+  site           Site           @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  lines          ConflictLine[]
+  decision       AdminDecision?
+
+  @@index([status, reportedAt])
+  @@index([siteId, status])
+  @@map("quantity_conflicts")
+}
+
+model ConflictLine {
+  id            String           @id @default(uuid()) @db.Uuid
+  conflictId    String           @map("conflict_id") @db.Uuid
+  itemId        String           @map("item_id") @db.Uuid
+  sentScaled    BigInt           @map("sent_scaled")
+  countedScaled BigInt           @map("counted_scaled")
+  finalScaled   BigInt?          @map("final_scaled")
+  note          String?          @db.VarChar(500)
+  conflict      QuantityConflict @relation(fields: [conflictId], references: [id], onDelete: Restrict)
+  item          Item             @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  @@unique([conflictId, itemId])
+  @@map("conflict_lines")
+}
+
+model AdminDecision {
+  id                String                    @id @default(uuid()) @db.Uuid
+  conflictId        String                    @unique @map("conflict_id") @db.Uuid
+  adminUserId       String                    @map("admin_user_id") @db.Uuid
+  expectedVersion   Int                       @map("expected_version")
+  reason            String                    @db.VarChar(500)
+  applicationStatus DecisionApplicationStatus @default(CREATED) @map("application_status")
+  decidedAt         DateTime                  @default(now()) @map("decided_at") @db.Timestamptz(6)
+  appliedAt         DateTime?                 @map("applied_at") @db.Timestamptz(6)
+  conflict          QuantityConflict          @relation(fields: [conflictId], references: [id], onDelete: Restrict)
+  adminUser         User                      @relation(fields: [adminUserId], references: [id], onDelete: Restrict)
+
+  @@map("admin_decisions")
+}
+
+model IngredientVariance {
+  id                       String   @id @default(uuid()) @db.Uuid
+  siteId                   String   @map("site_id") @db.Uuid
+  itemId                   String   @map("item_id") @db.Uuid
+  businessDate             DateTime @map("business_date") @db.Date
+  expectedScaled           BigInt   @map("expected_scaled")
+  actualScaled             BigInt   @map("actual_scaled")
+  recordedWasteScaled      BigInt   @default(0) @map("recorded_waste_scaled")
+  unexplainedVarianceScaled BigInt  @map("unexplained_variance_scaled")
+  costMinorPerScale        BigInt?  @map("cost_minor_per_scale")
+  createdAt                DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  site                     Site     @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  item                     Item     @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  @@unique([siteId, itemId, businessDate])
+  @@index([siteId, businessDate])
+  @@map("ingredient_variances")
 }

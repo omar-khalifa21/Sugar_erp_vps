@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sugar-erp.local/contracts/v1/sync-event.schema.json",
+  "title": "Sugar ERP Contract v1 event envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "device_sequence", "event_type", "schema_version", "occurred_at", "payload", "content_hash"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "device_sequence": { "type": "integer", "minimum": 1 },
+    "event_type": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{2,119}$" },
+    "schema_version": { "type": "integer", "minimum": 1 },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "payload": { "type": "object" },
+    "dependencies": {
+      "type": "array",
+      "maxItems": 50,
+      "uniqueItems": true,
+      "items": { "type": "string", "format": "uuid" }
+    },
+    "content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

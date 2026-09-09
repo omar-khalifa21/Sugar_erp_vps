@@ -1,9 +1,6 @@
 import {
-  Activity,
   AlertTriangle,
-  ArchiveRestore,
   Boxes,
-  Building2,
   ChefHat,
   ChevronLeft,
   CircleDollarSign,
@@ -26,7 +23,22 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { FormEvent, useCallback, useEffect, useState } from 'react';
-import { ApiError, api, type Device, type Item, type Role, type Site, type SiteType, type User } from './api';
+import {
+  ApiError,
+  api,
+  friendlyError,
+  type BranchOverview,
+  type CafeCustomerInput,
+  type CafeOverview,
+  type Device,
+  type Item,
+  type KitchenOverview,
+  type QuantityConflict,
+  type Role,
+  type Site,
+  type SiteType,
+  type User,
+} from './api';
 
 type PageKey =
   | 'dashboard'
@@ -81,6 +93,25 @@ const siteTypeLabels: Record<SiteType, string> = {
   KITCHEN: 'المطبخ',
 };
 
+const permissionOptions = [
+  { code: '*', label: 'كل صلاحيات النظام' },
+  { code: 'sales.create', label: 'إنشاء المبيعات' },
+  { code: 'sales.current_shift.read', label: 'عرض الوردية الحالية' },
+  { code: 'sales.history.read', label: 'عرض سجل المبيعات' },
+  { code: 'stock.read', label: 'عرض المخزون' },
+  { code: 'stock.adjust.request', label: 'طلب تعديل المخزون' },
+  { code: 'kitchen.request', label: 'طلب منتجات من المطبخ' },
+  { code: 'kitchen.dispatch', label: 'اعتماد وإرسال الطلبات' },
+  { code: 'ingredients.read', label: 'عرض خامات المطبخ' },
+  { code: 'reports.read', label: 'عرض وتحميل التقارير' },
+  { code: 'cafe.invoice', label: 'إنشاء فواتير الكافيه' },
+  { code: 'cafe.payment', label: 'تسجيل تحصيلات الكافيه' },
+  { code: 'prices.manage', label: 'تعديل الأسعار' },
+  { code: 'users.manage', label: 'إدارة المستخدمين والصلاحيات' },
+] as const;
+
+const permissionLabel = (code: string) => permissionOptions.find((permission) => permission.code === code)?.label ?? code;
+
 function App() {
   const [token, setToken] = useState(() => sessionStorage.getItem('sugar_admin_token'));
 
@@ -111,7 +142,7 @@ function LoginScreen({ onSignIn }: { onSignIn: (token: string) => void }) {
       const result = await api.login(username, password);
       onSignIn(result.access_token);
     } catch (caught) {
-      setError(caught instanceof ApiError ? caught.message : 'تعذر الاتصال بالخادم');
+      setError(caught instanceof ApiError && caught.status === 401 ? 'اسم المستخدم أو كلمة المرور غير صحيحة.' : friendlyError(caught));
     } finally {
       setBusy(false);
     }
@@ -167,6 +198,8 @@ function AdminApp({ token, onSignOut }: { token: string; onSignOut: () => void }
   const [menuOpen, setMenuOpen] = useState(false);
   const [touchMode, setTouchMode] = useState(() => localStorage.getItem('sugar_touch_mode') === 'true');
   const [lastLoaded, setLastLoaded] = useState<Date | null>(null);
+  const [selectedSiteId, setSelectedSiteId] = useState<string | null>(null);
+  const [toast, setToast] = useState('');
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -186,7 +219,7 @@ function AdminApp({ token, onSignOut }: { token: string; onSignOut: () => void }
         onSignOut();
         return;
       }
-      setError(caught instanceof Error ? caught.message : 'تعذر تحميل البيانات');
+      setError(friendlyError(caught));
     } finally {
       setLoading(false);
     }
@@ -197,9 +230,15 @@ function AdminApp({ token, onSignOut }: { token: string; onSignOut: () => void }
     document.body.classList.toggle('touch-mode', touchMode);
     localStorage.setItem('sugar_touch_mode', String(touchMode));
   }, [touchMode]);
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(''), 3500);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
 
-  const navigate = (key: PageKey) => {
+  const navigate = (key: PageKey, siteId?: string) => {
     setPage(key);
+    setSelectedSiteId(siteId ?? null);
     setMenuOpen(false);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -207,11 +246,108 @@ function AdminApp({ token, onSignOut }: { token: string; onSignOut: () => void }
   const createSite = async (input: Pick<Site, 'code' | 'name' | 'type'>) => {
     const site = await api.createSite(token, input);
     setData((current) => ({ ...current, sites: [...current.sites, site].sort((a, b) => a.code.localeCompare(b.code)) }));
+    setToast('تمت إضافة الموقع بنجاح');
   };
 
-  const createItem = async (input: Pick<Item, 'sku' | 'nameAr' | 'unit' | 'quantityScale' | 'kind'>) => {
+  const updateSite = async (id: string, input: Partial<Pick<Site, 'code' | 'name' | 'type' | 'active'>>) => {
+    const site = await api.updateSite(token, id, input);
+    setData((current) => ({ ...current, sites: current.sites.map((entry) => entry.id === id ? site : entry) }));
+    setToast('تم حفظ تعديلات الموقع');
+  };
+
+  const archiveSite = async (id: string) => {
+    const site = await api.archiveSite(token, id);
+    setData((current) => ({ ...current, sites: current.sites.map((entry) => entry.id === id ? site : entry) }));
+    setToast('تمت أرشفة الموقع مع الاحتفاظ بسجله');
+  };
+
+  const createItem = async (input: Pick<Item, 'sku' | 'nameAr' | 'unit' | 'quantityScale' | 'retailPriceMinor' | 'kind'>) => {
     const item = await api.createItem(token, input);
     setData((current) => ({ ...current, items: [...current.items, item].sort((a, b) => a.sku.localeCompare(b.sku)) }));
+    setToast('تمت إضافة الصنف بنجاح');
+  };
+
+  const updateItem = async (id: string, input: Partial<Pick<Item, 'sku' | 'nameAr' | 'unit' | 'quantityScale' | 'retailPriceMinor' | 'kind' | 'active'>>) => {
+    const item = await api.updateItem(token, id, input);
+    setData((current) => ({ ...current, items: current.items.map((entry) => entry.id === id ? item : entry) }));
+    setToast('تم حفظ تعديلات الصنف');
+  };
+
+  const archiveItem = async (id: string) => {
+    const item = await api.archiveItem(token, id);
+    setData((current) => ({ ...current, items: current.items.map((entry) => entry.id === id ? item : entry) }));
+    setToast('تمت أرشفة الصنف مع الاحتفاظ بالحركات السابقة');
+  };
+
+  const createUser = async (input: { username: string; displayName: string; password: string; roleId: string; siteId?: string }) => {
+    const user = await api.createUser(token, input);
+    setData((current) => ({ ...current, users: [...current.users, user].sort((a, b) => a.username.localeCompare(b.username)) }));
+    setToast('تمت إضافة المستخدم');
+  };
+
+  const updateUser = async (id: string, input: { username?: string; displayName?: string; password?: string; active?: boolean; roleId?: string; siteId?: string }) => {
+    const user = await api.updateUser(token, id, input);
+    setData((current) => ({ ...current, users: current.users.map((entry) => entry.id === id ? user : entry) }));
+    setToast('تم حفظ تعديلات المستخدم');
+  };
+
+  const archiveUser = async (id: string) => {
+    const user = await api.archiveUser(token, id);
+    setData((current) => ({ ...current, users: current.users.map((entry) => entry.id === id ? user : entry) }));
+    setToast('تم إيقاف المستخدم مع الاحتفاظ بسجله');
+  };
+
+  const createRole = async (input: { code: string; name: string; permissions: string[] }) => {
+    const role = await api.createRole(token, input);
+    setData((current) => ({ ...current, roles: [...current.roles, role].sort((a, b) => a.code.localeCompare(b.code)) }));
+    setToast('تمت إضافة الدور');
+  };
+
+  const updateRole = async (id: string, input: { code?: string; name?: string; permissions?: string[]; active?: boolean }) => {
+    const role = await api.updateRole(token, id, input);
+    setData((current) => ({ ...current, roles: current.roles.map((entry) => entry.id === id ? role : entry) }));
+    setToast('تم حفظ تعديلات الدور');
+  };
+
+  const archiveRole = async (id: string) => {
+    const role = await api.archiveRole(token, id);
+    setData((current) => ({ ...current, roles: current.roles.map((entry) => entry.id === id ? role : entry) }));
+    setToast('تمت أرشفة الدور');
+  };
+
+  const issueEnrollmentToken = async (siteId: string) => {
+    const result = await api.issueEnrollmentToken(token, siteId);
+    setToast('تم إنشاء رمز تسجيل صالح لمدة ٣٠ دقيقة');
+    return result;
+  };
+  const loadBranchOverview = useCallback((siteId: string) => api.branchOverview(token, siteId), [token]);
+  const requestStockAdjustment = async (siteId: string, input: { itemId: string; location: BranchOverview['stock'][number]['location']; deltaScaled: string; reason: string; expectedVersion: number }) => {
+    const result = await api.requestStockAdjustment(token, siteId, input);
+    setToast('تم إرسال طلب التعديل إلى جهاز الفرع للتطبيق الموثق');
+    return result;
+  };
+  const loadCafeOverview = useCallback(() => api.cafeOverview(token), [token]);
+  const createCafeCustomer = async (input: CafeCustomerInput) => {
+    await api.createCafeCustomer(token, input);
+    setToast('تمت إضافة حساب الكافيه');
+  };
+  const updateCafeCustomer = async (id: string, input: Partial<CafeCustomerInput> & { active?: boolean }) => {
+    await api.updateCafeCustomer(token, id, input);
+    setToast('تم حفظ بيانات الكافيه');
+  };
+  const archiveCafeCustomer = async (id: string) => {
+    await api.archiveCafeCustomer(token, id);
+    setToast('تمت أرشفة حساب الكافيه مع الاحتفاظ بفواتيره');
+  };
+  const setCafePrice = async (customerId: string, itemId: string, priceMinor: number) => {
+    await api.setCafePrice(token, customerId, itemId, priceMinor);
+    setToast('تم نشر سعر الكافيه الجديد دون تغيير الفواتير القديمة');
+  };
+  const loadKitchenOverview = useCallback(() => api.kitchenOverview(token), [token]);
+  const loadConflicts = useCallback(() => api.conflicts(token), [token]);
+  const decideConflict = async (id: string, input: { expectedVersion: number; reason: string; lines: Array<{ lineId: string; finalScaled: string }> }) => {
+    await api.decideConflict(token, id, input);
+    setToast('تم حفظ القرار وإرساله للموقع للتطبيق');
   };
 
   return (
@@ -249,14 +385,38 @@ function AdminApp({ token, onSignOut }: { token: string; onSignOut: () => void }
         </header>
         <main className="content">
           {error && <div className="global-error" role="alert"><AlertTriangle size={20} /><span>{error}</span><button onClick={() => void loadData()}>إعادة المحاولة</button></div>}
+          {toast && <div className="toast" role="status"><ClipboardCheck size={19} />{toast}</div>}
           {loading && !lastLoaded ? <LoadingPage /> : (
             <PageContent
               page={page}
               data={data}
               lastLoaded={lastLoaded}
               onCreateSite={createSite}
+              onUpdateSite={updateSite}
+              onArchiveSite={archiveSite}
               onCreateItem={createItem}
+              onUpdateItem={updateItem}
+              onArchiveItem={archiveItem}
+              onCreateUser={createUser}
+              onUpdateUser={updateUser}
+              onArchiveUser={archiveUser}
+              onCreateRole={createRole}
+              onUpdateRole={updateRole}
+              onArchiveRole={archiveRole}
+              onIssueEnrollmentToken={issueEnrollmentToken}
+              onLoadBranchOverview={loadBranchOverview}
+              onRequestStockAdjustment={requestStockAdjustment}
+              onLoadCafeOverview={loadCafeOverview}
+              onCreateCafeCustomer={createCafeCustomer}
+              onUpdateCafeCustomer={updateCafeCustomer}
+              onArchiveCafeCustomer={archiveCafeCustomer}
+              onSetCafePrice={setCafePrice}
+              onLoadKitchenOverview={loadKitchenOverview}
+              onLoadConflicts={loadConflicts}
+              onDecideConflict={decideConflict}
               onNavigate={navigate}
+              selectedSiteId={selectedSiteId}
+              onSelectSite={setSelectedSiteId}
             />
           )}
         </main>
@@ -265,74 +425,88 @@ function AdminApp({ token, onSignOut }: { token: string; onSignOut: () => void }
   );
 }
 
-function PageContent({ page, data, lastLoaded, onCreateSite, onCreateItem, onNavigate }: {
+function PageContent({ page, data, lastLoaded, onCreateSite, onUpdateSite, onArchiveSite, onCreateItem, onUpdateItem, onArchiveItem, onCreateUser, onUpdateUser, onArchiveUser, onCreateRole, onUpdateRole, onArchiveRole, onIssueEnrollmentToken, onLoadBranchOverview, onRequestStockAdjustment, onLoadCafeOverview, onCreateCafeCustomer, onUpdateCafeCustomer, onArchiveCafeCustomer, onSetCafePrice, onLoadKitchenOverview, onLoadConflicts, onDecideConflict, onNavigate, selectedSiteId, onSelectSite }: {
   page: PageKey;
   data: AdminData;
   lastLoaded: Date | null;
   onCreateSite: (input: Pick<Site, 'code' | 'name' | 'type'>) => Promise<void>;
-  onCreateItem: (input: Pick<Item, 'sku' | 'nameAr' | 'unit' | 'quantityScale' | 'kind'>) => Promise<void>;
-  onNavigate: (page: PageKey) => void;
+  onUpdateSite: (id: string, input: Partial<Pick<Site, 'code' | 'name' | 'type' | 'active'>>) => Promise<void>;
+  onArchiveSite: (id: string) => Promise<void>;
+  onCreateItem: (input: Pick<Item, 'sku' | 'nameAr' | 'unit' | 'quantityScale' | 'retailPriceMinor' | 'kind'>) => Promise<void>;
+  onUpdateItem: (id: string, input: Partial<Pick<Item, 'sku' | 'nameAr' | 'unit' | 'quantityScale' | 'retailPriceMinor' | 'kind' | 'active'>>) => Promise<void>;
+  onArchiveItem: (id: string) => Promise<void>;
+  onCreateUser: (input: { username: string; displayName: string; password: string; roleId: string; siteId?: string }) => Promise<void>;
+  onUpdateUser: (id: string, input: { username?: string; displayName?: string; password?: string; active?: boolean; roleId?: string; siteId?: string }) => Promise<void>;
+  onArchiveUser: (id: string) => Promise<void>;
+  onCreateRole: (input: { code: string; name: string; permissions: string[] }) => Promise<void>;
+  onUpdateRole: (id: string, input: { code?: string; name?: string; permissions?: string[]; active?: boolean }) => Promise<void>;
+  onArchiveRole: (id: string) => Promise<void>;
+  onIssueEnrollmentToken: (siteId: string) => Promise<{ id: string; token: string; siteId: string; profile: SiteType; expiresAt: string }>;
+  onLoadBranchOverview: (siteId: string) => Promise<BranchOverview>;
+  onRequestStockAdjustment: (siteId: string, input: { itemId: string; location: BranchOverview['stock'][number]['location']; deltaScaled: string; reason: string; expectedVersion: number }) => Promise<{ id: string; status: string; delta_scaled: string; created_at: string }>;
+  onLoadCafeOverview: () => Promise<CafeOverview>;
+  onCreateCafeCustomer: (input: CafeCustomerInput) => Promise<void>;
+  onUpdateCafeCustomer: (id: string, input: Partial<CafeCustomerInput> & { active?: boolean }) => Promise<void>;
+  onArchiveCafeCustomer: (id: string) => Promise<void>;
+  onSetCafePrice: (customerId: string, itemId: string, priceMinor: number) => Promise<void>;
+  onLoadKitchenOverview: () => Promise<KitchenOverview>;
+  onLoadConflicts: () => Promise<QuantityConflict[]>;
+  onDecideConflict: (id: string, input: { expectedVersion: number; reason: string; lines: Array<{ lineId: string; finalScaled: string }> }) => Promise<void>;
+  onNavigate: (page: PageKey, siteId?: string) => void;
+  selectedSiteId: string | null;
+  onSelectSite: (siteId: string | null) => void;
 }) {
   switch (page) {
     case 'dashboard': return <Dashboard data={data} lastLoaded={lastLoaded} onNavigate={onNavigate} />;
-    case 'branches': return <BranchesPage data={data} onCreate={onCreateSite} />;
-    case 'cafe': return <CafePage />;
-    case 'kitchen': return <KitchenPage data={data} />;
-    case 'conflicts': return <ConflictsPage />;
-    case 'catalog': return <CatalogPage items={data.items} onCreate={onCreateItem} />;
-    case 'team': return <TeamPage users={data.users} roles={data.roles} />;
-    case 'operations': return <OperationsPage data={data} />;
+    case 'branches': return <BranchesPage data={data} selectedSiteId={selectedSiteId} onSelectSite={onSelectSite} onCreate={onCreateSite} onUpdate={onUpdateSite} onArchive={onArchiveSite} onLoadOverview={onLoadBranchOverview} onRequestAdjustment={onRequestStockAdjustment} />;
+    case 'cafe': return <CafePage items={data.items} onLoad={onLoadCafeOverview} onCreate={onCreateCafeCustomer} onUpdate={onUpdateCafeCustomer} onArchive={onArchiveCafeCustomer} onSetPrice={onSetCafePrice} />;
+    case 'kitchen': return <KitchenPage data={data} onLoad={onLoadKitchenOverview} />;
+    case 'conflicts': return <ConflictsPage onLoad={onLoadConflicts} onDecide={onDecideConflict} />;
+    case 'catalog': return <CatalogPage items={data.items} onCreate={onCreateItem} onUpdate={onUpdateItem} onArchive={onArchiveItem} />;
+    case 'team': return <TeamPage users={data.users} roles={data.roles} sites={data.sites} onCreateUser={onCreateUser} onUpdateUser={onUpdateUser} onArchiveUser={onArchiveUser} onCreateRole={onCreateRole} onUpdateRole={onUpdateRole} onArchiveRole={onArchiveRole} />;
+    case 'operations': return <OperationsPage data={data} onIssueEnrollmentToken={onIssueEnrollmentToken} />;
   }
 }
 
-function Dashboard({ data, lastLoaded, onNavigate }: { data: AdminData; lastLoaded: Date | null; onNavigate: (page: PageKey) => void }) {
-  const branches = data.sites.filter((site) => site.type !== 'KITCHEN');
-  const kitchens = data.sites.filter((site) => site.type === 'KITCHEN');
+function Dashboard({ data, lastLoaded, onNavigate }: { data: AdminData; lastLoaded: Date | null; onNavigate: (page: PageKey, siteId?: string) => void }) {
+  const branches = data.sites.filter((site) => site.active && site.type !== 'KITCHEN');
   const enrolled = data.devices.filter((device) => device.enrollmentStatus === 'ENROLLED').length;
   const freshness = lastLoaded ? new Intl.DateTimeFormat('ar-EG', { hour: '2-digit', minute: '2-digit', timeZone: 'Africa/Cairo' }).format(lastLoaded) : '—';
 
-  return (
-    <div className="page-stack">
-      <section className="status-ribbon">
-        <div><span className="live-dot" /> <strong>الخادم متصل</strong><span>آخر تحديث {freshness}</span></div>
-        <button onClick={() => onNavigate('operations')}>تفاصيل التشغيل <ChevronLeft size={17} /></button>
-      </section>
-      <section className="stats-grid">
-        <StatCard label="الفروع النشطة" value={String(branches.length)} note="مواقع بيع مسجلة" icon={Store} tone="indigo" />
-        <StatCard label="المطبخ المركزي" value={String(kitchens.length)} note="موقع إنتاج مسجل" icon={ChefHat} tone="orange" />
-        <StatCard label="الأجهزة المسجلة" value={`${enrolled}/${data.devices.length}`} note="مسجل / إجمالي" icon={MonitorSmartphone} tone="blue" />
-        <StatCard label="الأصناف" value={String(data.items.length)} note="منتجات وخامات" icon={Boxes} tone="green" />
-      </section>
-      <section className="dashboard-grid">
-        <article className="panel wide-panel">
-          <PanelHeading title="حالة المواقع" subtitle="بيانات حقيقية من قاعدة PostgreSQL" action="عرض الفروع" onAction={() => onNavigate('branches')} />
-          {data.sites.length ? <div className="site-overview-list">{data.sites.map((site) => {
-            const siteDevices = data.devices.filter((device) => device.siteId === site.id);
-            return <div className="site-overview-row" key={site.id}>
-              <div className={`site-icon ${site.type === 'KITCHEN' ? 'kitchen' : ''}`}>{site.type === 'KITCHEN' ? <ChefHat /> : <Building2 />}</div>
-              <div className="grow"><strong>{site.name}</strong><span>{site.code} · {siteTypeLabels[site.type]}</span></div>
-              <div className="sync-cell"><span className={siteDevices.some((device) => device.enrollmentStatus === 'ENROLLED') ? 'status-good' : 'status-warn'}>{siteDevices.some((device) => device.enrollmentStatus === 'ENROLLED') ? 'متصل' : 'بانتظار التسجيل'}</span><small>{siteDevices.length} جهاز</small></div>
-            </div>;
-          })}</div> : <EmptyState icon={Store} title="لا توجد مواقع بعد" text="أضف أول فرع أو مطبخ لبدء الإعداد." />}
-        </article>
-        <article className="panel attention-panel">
-          <PanelHeading title="تحتاج انتباهك" subtitle="متابعة التشغيل المركزي" />
-          <div className="attention-list">
-            <button onClick={() => onNavigate('operations')}><span className="attention-icon amber"><MonitorSmartphone /></span><span><strong>{data.devices.filter((device) => device.enrollmentStatus === 'PENDING').length} أجهزة</strong><small>بانتظار إتمام التسجيل</small></span><ChevronLeft /></button>
-            <button onClick={() => onNavigate('conflicts')}><span className="attention-icon violet"><ClipboardCheck /></span><span><strong>لا تعارضات واردة</strong><small>ستظهر بعد أول مزامنة تشغيلية</small></span><ChevronLeft /></button>
-            <button onClick={() => onNavigate('operations')}><span className="attention-icon blue"><DatabaseBackup /></span><span><strong>النسخ الاحتياطي</strong><small>جاهز للإعداد في بيئة VPS</small></span><ChevronLeft /></button>
-          </div>
-        </article>
-      </section>
-      <section className="panel data-waiting">
-        <div><Activity size={23} /><div><strong>بيانات المبيعات والتحصيل</strong><p>لم تصل معاملات تشغيلية من أجهزة الفروع بعد. لن تعرض اللوحة أرقاماً تقديرية أو أرباحاً غير محسوبة.</p></div></div>
-        <span className="pill neutral">بانتظار أول مزامنة</span>
-      </section>
-    </div>
-  );
+  return <div className="page-stack cupcake-dashboard">
+    <section className="welcome-strip"><div><span className="live-dot" /><div><strong>كل شيء يعمل بهدوء</strong><small>آخر تحديث {freshness}</small></div></div><button onClick={() => onNavigate('operations')}>حالة النظام <ChevronLeft size={17} /></button></section>
+    <section className="simple-stats">
+      <div><span>الفروع</span><strong>{branches.length}</strong></div>
+      <div><span>الأجهزة المتصلة</span><strong>{enrolled}</strong></div>
+      <div><span>الأصناف النشطة</span><strong>{data.items.filter((item) => item.active).length}</strong></div>
+    </section>
+    <section className="panel branch-home">
+      <PanelHeading title="الفروع" subtitle="اختر فرعاً لرؤية المخزون والمبيعات والتفاصيل" action="إدارة الكل" onAction={() => onNavigate('branches')} />
+      <div className="branch-tiles">
+        {branches.map((site) => {
+          const connected = data.devices.some((device) => device.siteId === site.id && device.enrollmentStatus === 'ENROLLED');
+          return <button key={site.id} onClick={() => onNavigate('branches', site.id)}><span className="cupcake-site-icon"><Store /></span><span><strong>{site.name}</strong><small>{siteTypeLabels[site.type]}</small></span><span className={connected ? 'tiny-state online' : 'tiny-state'}>{connected ? 'متصل' : 'بانتظار الجهاز'}</span><ChevronLeft /></button>;
+        })}
+        {!branches.length && <EmptyState icon={Store} title="لا توجد فروع بعد" text="أضف أول فرع لتبدأ." />}
+      </div>
+    </section>
+    <section className="quiet-actions">
+      <button onClick={() => onNavigate('conflicts')}><ClipboardCheck /><span><strong>التعارضات</strong><small>لا توجد تعارضات مفتوحة</small></span><ChevronLeft /></button>
+      <button onClick={() => onNavigate('operations')}><DatabaseBackup /><span><strong>حماية البيانات</strong><small>النسخ والاستعادة والأجهزة</small></span><ChevronLeft /></button>
+    </section>
+  </div>;
 }
 
-function BranchesPage({ data, onCreate }: { data: AdminData; onCreate: (input: Pick<Site, 'code' | 'name' | 'type'>) => Promise<void> }) {
+function BranchesPage({ data, selectedSiteId, onSelectSite, onCreate, onUpdate, onArchive, onLoadOverview, onRequestAdjustment }: {
+  data: AdminData;
+  selectedSiteId: string | null;
+  onSelectSite: (id: string | null) => void;
+  onCreate: (input: Pick<Site, 'code' | 'name' | 'type'>) => Promise<void>;
+  onUpdate: (id: string, input: Partial<Pick<Site, 'code' | 'name' | 'type' | 'active'>>) => Promise<void>;
+  onArchive: (id: string) => Promise<void>;
+  onLoadOverview: (siteId: string) => Promise<BranchOverview>;
+  onRequestAdjustment: (siteId: string, input: { itemId: string; location: BranchOverview['stock'][number]['location']; deltaScaled: string; reason: string; expectedVersion: number }) => Promise<unknown>;
+}) {
   const [showForm, setShowForm] = useState(false);
   const [code, setCode] = useState('');
   const [name, setName] = useState('');
@@ -343,9 +517,12 @@ function BranchesPage({ data, onCreate }: { data: AdminData; onCreate: (input: P
   const submit = async (event: FormEvent) => {
     event.preventDefault(); setBusy(true); setMessage('');
     try { await onCreate({ code, name, type }); setCode(''); setName(''); setShowForm(false); }
-    catch (caught) { setMessage(caught instanceof Error ? caught.message : 'تعذر إضافة الموقع'); }
+    catch (caught) { setMessage(friendlyError(caught)); }
     finally { setBusy(false); }
   };
+
+  const selected = data.sites.find((site) => site.id === selectedSiteId);
+  if (selected) return <BranchDetail site={selected} data={data} onBack={() => onSelectSite(null)} onUpdate={onUpdate} onArchive={onArchive} onLoadOverview={onLoadOverview} onRequestAdjustment={onRequestAdjustment} />;
 
   return <div className="page-stack">
     <SectionToolbar count={`${data.sites.length} مواقع`} action="إضافة موقع" onAction={() => setShowForm((value) => !value)} />
@@ -356,64 +533,305 @@ function BranchesPage({ data, onCreate }: { data: AdminData; onCreate: (input: P
       <button className="primary-button" disabled={busy}>{busy ? 'جارٍ الحفظ' : 'حفظ الموقع'}</button>
       {message && <p className="form-error">{message}</p>}
     </form>}
-    <section className="card-grid">
-      {data.sites.map((site) => {
-        const devices = data.devices.filter((device) => device.siteId === site.id);
-        return <article className="site-card" key={site.id}>
-          <div className="site-card-head"><div className={`site-icon ${site.type === 'KITCHEN' ? 'kitchen' : ''}`}>{site.type === 'KITCHEN' ? <ChefHat /> : <Store />}</div><span className={`pill ${site.active ? 'success' : 'neutral'}`}>{site.active ? 'نشط' : 'متوقف'}</span></div>
-          <h2>{site.name}</h2><p>{site.code} · {siteTypeLabels[site.type]}</p>
-          <dl><div><dt>الأجهزة</dt><dd>{devices.length}</dd></div><div><dt>المنطقة الزمنية</dt><dd>{site.timezone}</dd></div></dl>
-          <div className="card-footer"><span className={devices.some((device) => device.enrollmentStatus === 'ENROLLED') ? 'status-good' : 'status-warn'}>{devices.some((device) => device.enrollmentStatus === 'ENROLLED') ? 'المزامنة متاحة' : 'بانتظار جهاز'}</span></div>
-        </article>;
-      })}
+    <section className="branch-card-grid">
+      {data.sites.map((site) => <button className={`simple-branch-card ${!site.active ? 'archived' : ''}`} key={site.id} onClick={() => onSelectSite(site.id)}><span className={`site-icon ${site.type === 'KITCHEN' ? 'kitchen' : ''}`}>{site.type === 'KITCHEN' ? <ChefHat /> : <Store />}</span><span><strong>{site.name}</strong><small>{siteTypeLabels[site.type]}</small></span><span className={`pill ${site.active ? 'success' : 'neutral'}`}>{site.active ? 'نشط' : 'مؤرشف'}</span><ChevronLeft /></button>)}
       {!data.sites.length && <EmptyState icon={Store} title="لا توجد مواقع" text="استخدم زر إضافة موقع للبدء." />}
     </section>
   </div>;
 }
 
-function CatalogPage({ items, onCreate }: { items: Item[]; onCreate: (input: Pick<Item, 'sku' | 'nameAr' | 'unit' | 'quantityScale' | 'kind'>) => Promise<void> }) {
-  const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ sku: '', nameAr: '', unit: 'قطعة', quantityScale: 1, kind: 'PRODUCT' as Item['kind'] });
+function BranchDetail({ site, data, onBack, onUpdate, onArchive, onLoadOverview, onRequestAdjustment }: { site: Site; data: AdminData; onBack: () => void; onUpdate: (id: string, input: Partial<Pick<Site, 'code' | 'name' | 'type' | 'active'>>) => Promise<void>; onArchive: (id: string) => Promise<void>; onLoadOverview: (siteId: string) => Promise<BranchOverview>; onRequestAdjustment: (siteId: string, input: { itemId: string; location: BranchOverview['stock'][number]['location']; deltaScaled: string; reason: string; expectedVersion: number }) => Promise<unknown> }) {
+  const [editing, setEditing] = useState(false);
+  const [confirmArchive, setConfirmArchive] = useState(false);
   const [message, setMessage] = useState('');
-  const submit = async (event: FormEvent) => {
-    event.preventDefault(); setMessage('');
-    try { await onCreate(form); setForm({ sku: '', nameAr: '', unit: 'قطعة', quantityScale: 1, kind: 'PRODUCT' }); setShowForm(false); }
-    catch (caught) { setMessage(caught instanceof Error ? caught.message : 'تعذر إضافة الصنف'); }
-  };
-  return <div className="page-stack">
-    <SectionToolbar count={`${items.length} أصناف`} action="إضافة صنف" onAction={() => setShowForm((value) => !value)} />
-    {showForm && <form className="panel inline-form catalog-form" onSubmit={submit}>
-      <label>الكود<input value={form.sku} onChange={(event) => setForm({ ...form, sku: event.target.value })} required /></label>
-      <label>الاسم العربي<input value={form.nameAr} onChange={(event) => setForm({ ...form, nameAr: event.target.value })} required /></label>
-      <label>الوحدة<input value={form.unit} onChange={(event) => setForm({ ...form, unit: event.target.value })} required /></label>
-      <label>النوع<select value={form.kind} onChange={(event) => setForm({ ...form, kind: event.target.value as Item['kind'] })}><option value="PRODUCT">منتج</option><option value="INGREDIENT">خامة</option></select></label>
-      <button className="primary-button">حفظ الصنف</button>{message && <p className="form-error">{message}</p>}
-    </form>}
-    <section className="panel table-panel"><div className="table-wrap"><table><thead><tr><th>الصنف</th><th>الكود</th><th>النوع</th><th>الوحدة</th><th>الإصدار</th><th>الحالة</th></tr></thead><tbody>{items.map((item) => <tr key={item.id}><td><strong>{item.nameAr}</strong></td><td className="ltr">{item.sku}</td><td>{item.kind === 'PRODUCT' ? 'منتج' : 'خامة'}</td><td>{item.unit}</td><td>{item.version}</td><td><span className={`pill ${item.active ? 'success' : 'neutral'}`}>{item.active ? 'نشط' : 'متوقف'}</span></td></tr>)}</tbody></table></div>{!items.length && <EmptyState icon={PackageSearch} title="الكتالوج فارغ" text="أضف المنتجات والخامات المركزية." />}</section>
+  const [form, setForm] = useState({ code: site.code, name: site.name, type: site.type });
+  const [overview, setOverview] = useState<BranchOverview | null>(null);
+  const [overviewLoading, setOverviewLoading] = useState(true);
+  const [adjusting, setAdjusting] = useState<BranchOverview['stock'][number] | null>(null);
+  const [adjustment, setAdjustment] = useState({ delta: '', reason: '' });
+  const devices = data.devices.filter((device) => device.siteId === site.id);
+  const refreshOverview = useCallback(async () => { setOverviewLoading(true); setMessage(''); try { setOverview(await onLoadOverview(site.id)); } catch (caught) { setMessage(friendlyError(caught)); } finally { setOverviewLoading(false); } }, [onLoadOverview, site.id]);
+  useEffect(() => { void refreshOverview(); }, [refreshOverview]);
+  const submit = async (event: FormEvent) => { event.preventDefault(); setMessage(''); try { await onUpdate(site.id, form); setEditing(false); } catch (caught) { setMessage(friendlyError(caught)); } };
+  const archive = async () => { if (!confirmArchive) { setConfirmArchive(true); return; } setMessage(''); try { await onArchive(site.id); setConfirmArchive(false); } catch (caught) { setMessage(friendlyError(caught)); } };
+  const submitAdjustment = async (event: FormEvent) => { event.preventDefault(); if (!adjusting) return; const numeric = Number(adjustment.delta); if (!Number.isFinite(numeric) || numeric === 0) { setMessage('أدخل فرق كمية صحيحاً غير الصفر.'); return; } setMessage(''); try { await onRequestAdjustment(site.id, { itemId: adjusting.item_id, location: adjusting.location, deltaScaled: String(Math.round(numeric * adjusting.quantity_scale)), reason: adjustment.reason, expectedVersion: adjusting.version }); setAdjusting(null); setAdjustment({ delta: '', reason: '' }); await refreshOverview(); } catch (caught) { setMessage(friendlyError(caught)); } };
+  return <div className="page-stack branch-detail">
+    <button className="back-button" onClick={onBack}>→ كل المواقع</button>
+    <section className="branch-title"><div className="cupcake-site-icon large"><Store /></div><div><span>{siteTypeLabels[site.type]}</span><h2>{site.name}</h2><p>{site.code}</p></div><div className="branch-title-actions"><button className="secondary-button" onClick={() => setEditing((value) => !value)}>تعديل</button><button className={confirmArchive ? 'danger-button confirm' : 'danger-button'} onClick={() => void archive()}>{confirmArchive ? 'تأكيد الأرشفة' : site.active ? 'أرشفة' : 'مؤرشف'}</button></div></section>
+    {message && <div className="form-error" role="alert">{message}</div>}
+    {editing && <form className="panel inline-form" onSubmit={submit}><label>الكود<input value={form.code} onChange={(event) => setForm({ ...form, code: event.target.value })} required /></label><label>الاسم<input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} required /></label><label>النوع<select value={form.type} disabled={devices.length > 0} onChange={(event) => setForm({ ...form, type: event.target.value as SiteType })}><option value="BRANCH_TYPE_1">فرع نوع ١</option><option value="BRANCH_TYPE_2">فرع نوع ٢</option><option value="KITCHEN">مطبخ</option></select></label><button className="primary-button">حفظ</button></form>}
+    {overviewLoading && !overview ? <div className="panel mini-loading"><RefreshCw className="spin" /> جارٍ تحميل بيانات الفرع…</div> : overview && <>
+      <section className="simple-stats branch-stats"><div><span>مبيعات اليوم</span><strong>{formatMoney(overview.sales.today.net_minor)}</strong><small>{overview.sales.today.receipt_count} إيصالات · EGP</small></div><div><span>إيراد الشهر</span><strong>{formatMoney(overview.sales.month.net_minor)}</strong><small>{overview.sales.month.receipt_count} إيصالات · EGP</small></div><div><span>الأجهزة</span><strong>{devices.length}</strong><small>{devices.filter((device) => device.enrollmentStatus === 'ENROLLED').length} متصل</small></div></section>
+      <section className={`freshness-note ${overview.freshness.stale ? 'stale' : ''}`}><span className="live-dot" /><span>{overview.freshness.as_of ? `المخزون حتى ${formatDate(overview.freshness.as_of)}` : 'لم يصل رصيد مخزون بعد'}</span>{overview.pending_adjustments > 0 && <span className="pill warning">{overview.pending_adjustments} تعديل بانتظار التطبيق</span>}</section>
+      {adjusting && <form className="panel adjustment-form" onSubmit={submitAdjustment}><div><strong>طلب تعديل: {adjusting.name_ar}</strong><small>لن تتغير الكمية حتى يطبّق جهاز الفرع الطلب ويسجله.</small></div><label>فرق الكمية<input type="number" step={1 / adjusting.quantity_scale} value={adjustment.delta} onChange={(event) => setAdjustment({ ...adjustment, delta: event.target.value })} placeholder="مثال: -2 أو 3" required /></label><label>سبب التعديل<input value={adjustment.reason} onChange={(event) => setAdjustment({ ...adjustment, reason: event.target.value })} minLength={3} required /></label><button className="primary-button">إرسال الطلب</button><button type="button" className="secondary-button" onClick={() => setAdjusting(null)}>إلغاء</button></form>}
+      <section className="panel table-panel"><PanelHeading title="المخزون الحالي" subtitle="الكميات والأسعار حسب الصنف والموقع؛ التعديل يتم كطلب موثق" /><div className="table-wrap"><table><thead><tr><th>الصنف</th><th>سعر البيع</th><th>التصنيف</th><th>الموقع</th><th>الكمية</th><th>آخر مزامنة</th><th>إجراء</th></tr></thead><tbody>{overview.stock.map((row) => <tr key={row.id}><td><strong>{row.name_ar}</strong><small className="cell-note ltr">{row.sku}</small></td><td><strong className="price-value">{formatMoney(String(row.retail_price_minor))} EGP</strong></td><td>{row.kind === 'PRODUCT' ? 'منتج' : 'خامة'}</td><td>{locationLabel(row.location)}</td><td><strong>{formatQuantity(row.quantity_scaled, row.quantity_scale)} {row.unit}</strong></td><td>{formatDate(row.as_of)}</td><td><div className="row-actions"><button onClick={() => { setAdjusting(row); setAdjustment({ delta: '', reason: '' }); }}>طلب تعديل</button></div></td></tr>)}</tbody></table></div>{!overview.stock.length && <EmptyState icon={Boxes} title="لا يوجد رصيد بعد" text="سيظهر الرصيد بعد أول مزامنة من جهاز الموقع." />}</section>
+      <section className="two-column"><article className="panel table-panel"><PanelHeading title="مبيعات اليوم" subtitle="الإيصالات الفعلية فقط، والإكراميات منفصلة" />{overview.sales.recent.length ? <div className="table-wrap"><table><thead><tr><th>الإيصال</th><th>الوردية</th><th>الصافي</th></tr></thead><tbody>{overview.sales.recent.map((sale) => <tr key={sale.id}><td className="ltr">{sale.receipt_number}</td><td>{sale.shift_kind === 'MORNING' ? 'صباحية' : 'مسائية'}</td><td>{formatMoney(sale.net_minor)} EGP</td></tr>)}</tbody></table></div> : <EmptyState compact icon={CircleDollarSign} title="لا مبيعات متزامنة" text="ستظهر الإيصالات هنا بعد اتصال جهاز الفرع." />}</article><article className="panel"><PanelHeading title="تفاصيل الفرع" subtitle="التشغيل والاتصال" /><dl className="detail-list"><div><dt>المنطقة الزمنية</dt><dd>{site.timezone}</dd></div><div><dt>حالة الموقع</dt><dd>{site.active ? 'نشط' : 'مؤرشف'}</dd></div><div><dt>نوع التشغيل</dt><dd>{siteTypeLabels[site.type]}</dd></div><div><dt>أنواع الأصناف</dt><dd>{new Set(overview.stock.map((row) => row.kind)).size}</dd></div></dl></article></section>
+    </>}
   </div>;
 }
 
-function CafePage() {
-  return <EmptyBusinessPage icon={CircleDollarSign} title="لا توجد حسابات كافيه متزامنة" text="عند وصول أول فاتورة ستظهر هنا قيمة الفواتير، المحصّل، والمتبقي لكل عميل بشكل منفصل." chips={['الفواتير الصادرة', 'التحصيلات', 'الرصيد المتبقي', 'تخصيص الدفعات']} />;
+function CatalogPage({ items, onCreate, onUpdate, onArchive }: {
+  items: Item[];
+  onCreate: (input: Pick<Item, 'sku' | 'nameAr' | 'unit' | 'quantityScale' | 'retailPriceMinor' | 'kind'>) => Promise<void>;
+  onUpdate: (id: string, input: Partial<Pick<Item, 'sku' | 'nameAr' | 'unit' | 'quantityScale' | 'retailPriceMinor' | 'kind' | 'active'>>) => Promise<void>;
+  onArchive: (id: string) => Promise<void>;
+}) {
+  const blankForm = { sku: '', nameAr: '', unit: 'قطعة', quantityScale: 1, priceEgp: '', kind: 'PRODUCT' as Item['kind'] };
+  const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [confirmArchiveId, setConfirmArchiveId] = useState<string | null>(null);
+  const [form, setForm] = useState(blankForm);
+  const [message, setMessage] = useState('');
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setMessage('');
+    const retailPriceMinor = moneyInputToMinor(form.priceEgp);
+    if (retailPriceMinor === null) {
+      setMessage('أدخل سعراً صحيحاً بالجنيه، وبحد أقصى رقمين بعد العلامة.');
+      return;
+    }
+    const input = {
+      sku: form.sku,
+      nameAr: form.nameAr,
+      unit: form.unit,
+      quantityScale: form.quantityScale,
+      retailPriceMinor,
+      kind: form.kind,
+    };
+    try {
+      if (editingId) await onUpdate(editingId, input);
+      else await onCreate(input);
+      setForm(blankForm);
+      setEditingId(null);
+      setShowForm(false);
+    } catch (caught) {
+      setMessage(friendlyError(caught));
+    }
+  };
+
+  const edit = (item: Item) => {
+    setForm({
+      sku: item.sku,
+      nameAr: item.nameAr,
+      unit: item.unit,
+      quantityScale: item.quantityScale,
+      priceEgp: moneyMinorToInput(item.retailPriceMinor),
+      kind: item.kind,
+    });
+    setEditingId(item.id);
+    setShowForm(true);
+  };
+
+  const archive = async (id: string) => {
+    if (confirmArchiveId !== id) { setConfirmArchiveId(id); return; }
+    setMessage('');
+    try { await onArchive(id); setConfirmArchiveId(null); }
+    catch (caught) { setMessage(friendlyError(caught)); }
+  };
+
+  return <div className="page-stack">
+    <SectionToolbar count={`${items.length} أصناف`} action="إضافة صنف وسعره" onAction={() => { setEditingId(null); setForm(blankForm); setShowForm((value) => !value); }} />
+    {message && <div className="form-error" role="alert">{message}</div>}
+    {showForm && <form className="panel inline-form catalog-form priced-form" onSubmit={submit}>
+      <label>الكود<input className="ltr" value={form.sku} onChange={(event) => setForm({ ...form, sku: event.target.value })} required /></label>
+      <label>الاسم العربي<input value={form.nameAr} onChange={(event) => setForm({ ...form, nameAr: event.target.value })} required /></label>
+      <label>سعر البيع (جنيه)<input className="ltr" inputMode="decimal" value={form.priceEgp} onChange={(event) => setForm({ ...form, priceEgp: event.target.value })} placeholder="0.00" required /></label>
+      <label>الوحدة<input value={form.unit} onChange={(event) => setForm({ ...form, unit: event.target.value })} required /></label>
+      <label>دقة الكمية<input type="number" min="1" step="1" value={form.quantityScale} onChange={(event) => setForm({ ...form, quantityScale: Number(event.target.value) })} required /></label>
+      <label>النوع<select value={form.kind} onChange={(event) => setForm({ ...form, kind: event.target.value as Item['kind'] })}><option value="PRODUCT">منتج</option><option value="INGREDIENT">خامة</option></select></label>
+      <button className="primary-button">{editingId ? 'حفظ الصنف والسعر' : 'حفظ الصنف'}</button>
+      <button type="button" className="secondary-button" onClick={() => { setShowForm(false); setEditingId(null); }}>إلغاء</button>
+    </form>}
+    <section className="panel table-panel">
+      <PanelHeading title="الأصناف والتسعيرات" subtitle="كل سعر بالجنيه المصري؛ أي تغيير جديد لا يمس أسعار الفواتير السابقة" />
+      <div className="table-wrap"><table><thead><tr><th>الصنف</th><th>الكود</th><th>سعر البيع</th><th>النوع</th><th>الوحدة</th><th>الحالة</th><th>إجراءات</th></tr></thead><tbody>
+        {items.map((item) => <tr key={item.id}><td><strong>{item.nameAr}</strong></td><td className="ltr">{item.sku}</td><td><strong className={item.retailPriceMinor === 0 ? 'price-missing' : 'price-value'}>{item.retailPriceMinor === 0 ? 'غير مسعّر' : `${formatMoney(String(item.retailPriceMinor))} EGP`}</strong></td><td>{item.kind === 'PRODUCT' ? 'منتج' : 'خامة'}</td><td>{item.unit}</td><td><span className={`pill ${item.active ? 'success' : 'neutral'}`}>{item.active ? 'نشط' : 'مؤرشف'}</span></td><td><div className="row-actions"><button onClick={() => edit(item)}>تعديل السعر والبيانات</button><button className={confirmArchiveId === item.id ? 'confirm-delete' : ''} disabled={!item.active} onClick={() => void archive(item.id)}>{confirmArchiveId === item.id ? 'تأكيد' : 'أرشفة'}</button></div></td></tr>)}
+      </tbody></table></div>
+      {!items.length && <EmptyState icon={PackageSearch} title="الكتالوج فارغ" text="أضف المنتجات والخامات وأسعارها المركزية." />}
+    </section>
+  </div>;
 }
 
-function KitchenPage({ data }: { data: AdminData }) {
+function CafePage({ items, onLoad, onCreate, onUpdate, onArchive, onSetPrice }: {
+  items: Item[];
+  onLoad: () => Promise<CafeOverview>;
+  onCreate: (input: CafeCustomerInput) => Promise<void>;
+  onUpdate: (id: string, input: Partial<CafeCustomerInput>) => Promise<void>;
+  onArchive: (id: string) => Promise<void>;
+  onSetPrice: (customerId: string, itemId: string, priceMinor: number) => Promise<void>;
+}) {
+  const blankForm: CafeCustomerInput = { code: '', name: '', contact: '', notes: '' };
+  const [overview, setOverview] = useState<CafeOverview | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedInvoiceId, setSelectedInvoiceId] = useState<string | null>(null);
+  const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [confirmArchive, setConfirmArchive] = useState(false);
+  const [form, setForm] = useState<CafeCustomerInput>(blankForm);
+  const [priceEdit, setPriceEdit] = useState<{ itemId: string; value: string } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [message, setMessage] = useState('');
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setMessage('');
+    try { setOverview(await onLoad()); }
+    catch (caught) { setMessage(friendlyError(caught)); }
+    finally { setLoading(false); }
+  }, [onLoad]);
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  const selected = overview?.customers.find((customer) => customer.id === selectedId) ?? null;
+  const selectedInvoice = selected?.invoices.find((invoice) => invoice.id === selectedInvoiceId) ?? null;
+  const openCreate = () => { setEditing(false); setForm(blankForm); setShowForm(true); };
+  const openEdit = () => {
+    if (!selected) return;
+    setEditing(true);
+    setForm({ code: selected.code, name: selected.name, contact: selected.contact ?? '', notes: selected.notes ?? '' });
+    setShowForm(true);
+  };
+  const submitCustomer = async (event: FormEvent) => {
+    event.preventDefault();
+    setMessage('');
+    try {
+      if (editing && selected) await onUpdate(selected.id, form);
+      else await onCreate(form);
+      setShowForm(false);
+      setEditing(false);
+      await refresh();
+    } catch (caught) { setMessage(friendlyError(caught)); }
+  };
+  const archive = async () => {
+    if (!selected) return;
+    if (!confirmArchive) { setConfirmArchive(true); return; }
+    setMessage('');
+    try { await onArchive(selected.id); setSelectedId(null); setConfirmArchive(false); await refresh(); }
+    catch (caught) { setMessage(friendlyError(caught)); }
+  };
+  const savePrice = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!selected || !priceEdit) return;
+    const priceMinor = moneyInputToMinor(priceEdit.value);
+    if (priceMinor === null) { setMessage('أدخل سعراً صحيحاً بالجنيه، وبحد أقصى رقمين بعد العلامة.'); return; }
+    setMessage('');
+    try { await onSetPrice(selected.id, priceEdit.itemId, priceMinor); setPriceEdit(null); await refresh(); }
+    catch (caught) { setMessage(friendlyError(caught)); }
+  };
+
+  if (selected) return <div className="page-stack cafe-detail">
+    <button className="back-button" onClick={() => { setSelectedId(null); setSelectedInvoiceId(null); setShowForm(false); }}>→ كل حسابات الكافيه</button>
+    <section className="branch-title cafe-title"><div className="cupcake-site-icon large"><CircleDollarSign /></div><div><span>حساب كافيه</span><h2>{selected.name}</h2><p>{selected.code}{selected.contact ? ` · ${selected.contact}` : ''}</p></div><div className="branch-title-actions"><button className="secondary-button" onClick={openEdit}>تعديل</button><button className={confirmArchive ? 'danger-button confirm' : 'danger-button'} onClick={() => void archive()}>{confirmArchive ? 'تأكيد الأرشفة' : 'أرشفة'}</button></div></section>
+    {message && <div className="form-error" role="alert">{message}</div>}
+    {showForm && <CafeCustomerForm form={form} setForm={setForm} editing={editing} onSubmit={submitCustomer} onCancel={() => setShowForm(false)} />}
+    <section className="simple-stats branch-stats"><div><span>إجمالي ما أخذه</span><strong>{formatMoney(selected.invoiced_minor)}</strong><small>قيمة الفواتير · EGP</small></div><div><span>المحصّل</span><strong>{formatMoney(selected.collected_minor)}</strong><small>دفعات فعلية · EGP</small></div><div><span>لسه عليه</span><strong>{formatMoney(selected.outstanding_minor)}</strong><small>رصيد مستحق · EGP</small></div></section>
+    {selected.notes && <section className="customer-note"><strong>ملاحظة الحساب</strong><span>{selected.notes}</span></section>}
+    <section className="panel cafe-prices"><PanelHeading title="أسعار هذا الكافيه" subtitle="السعر الخاص يتغلب على سعر البيع الأساسي فقط للفواتير الجديدة" /><div className="price-grid">{items.filter((item) => item.active && item.kind === 'PRODUCT').map((item) => {
+      const custom = selected.prices.find((price) => price.item_id === item.id);
+      return <article key={item.id}><div><strong>{item.nameAr}</strong><small>{custom ? 'سعر خاص' : 'السعر الأساسي'}</small></div><span>{formatMoney(String(custom?.price_minor ?? item.retailPriceMinor))} EGP</span><button onClick={() => setPriceEdit({ itemId: item.id, value: moneyMinorToInput(custom?.price_minor ?? item.retailPriceMinor) })}>تغيير</button></article>;
+    })}</div>{priceEdit && <form className="price-editor" onSubmit={savePrice}><label>السعر الجديد (جنيه)<input className="ltr" autoFocus inputMode="decimal" value={priceEdit.value} onChange={(event) => setPriceEdit({ ...priceEdit, value: event.target.value })} required /></label><button className="primary-button">نشر السعر</button><button type="button" className="secondary-button" onClick={() => setPriceEdit(null)}>إلغاء</button></form>}</section>
+    <section className="two-column cafe-ledger"><article className="panel"><PanelHeading title="الحاجات اللي استلمها" subtitle="اضغط على فاتورة لرؤية الأصناف والكميات والأسعار المحفوظة" /><div className="invoice-list">{selected.invoices.map((invoice) => <button key={invoice.id} className={selectedInvoiceId === invoice.id ? 'selected' : ''} onClick={() => setSelectedInvoiceId(selectedInvoiceId === invoice.id ? null : invoice.id)}><span><strong>{invoice.number}</strong><small>{invoice.business_date} · {invoice.issuing_site.name}</small></span><span><strong>{formatMoney(invoice.net_minor)} EGP</strong><small>متبقي {formatMoney(invoice.outstanding_minor)}</small></span><ChevronLeft /></button>)}{!selected.invoices.length && <EmptyState compact icon={Boxes} title="لا توجد فواتير" text="ستظهر البضاعة بعد مزامنة أول فاتورة." />}</div></article><article className="panel"><PanelHeading title="الدفعات" subtitle="المبالغ المحصّلة فعلياً، منفصلة عن الإيراد" /><div className="payment-list">{selected.payments.map((payment) => <div key={payment.id}><span><strong>{formatMoney(payment.amount_minor)} EGP</strong><small>{payment.collected_at_site.name}</small></span><span><strong>{payment.reference}</strong><small>{formatDate(payment.occurred_at)}</small></span></div>)}{!selected.payments.length && <EmptyState compact icon={CircleDollarSign} title="لم يُحصّل شيء بعد" text="الرصيد ما زال مستحقاً." />}</div></article></section>
+    {selectedInvoice && <section className="panel table-panel invoice-detail"><PanelHeading title={`تفاصيل الفاتورة ${selectedInvoice.number}`} subtitle="الأسماء والأسعار هنا لقطات تاريخية لا تتغير عند تعديل التسعير" /><div className="table-wrap"><table><thead><tr><th>الصنف</th><th>الكمية</th><th>سعر الوحدة</th><th>الإجمالي</th></tr></thead><tbody>{selectedInvoice.lines.map((line) => <tr key={line.id}><td><strong>{line.name_ar}</strong><small className="cell-note ltr">{line.sku}</small></td><td>{formatQuantity(line.quantity_scaled, line.quantity_scale)} {line.unit}</td><td>{formatMoney(String(line.unit_price_minor))} EGP</td><td><strong>{formatMoney(line.total_minor)} EGP</strong></td></tr>)}</tbody></table></div></section>}
+  </div>;
+
+  return <div className="page-stack">
+    <SectionToolbar count={`${overview?.customers.length ?? 0} حسابات`} action="إضافة كافيه" onAction={openCreate} />
+    {message && <div className="form-error" role="alert">{message}</div>}
+    {showForm && <CafeCustomerForm form={form} setForm={setForm} editing={false} onSubmit={submitCustomer} onCancel={() => setShowForm(false)} />}
+    {loading && !overview ? <div className="panel mini-loading"><RefreshCw className="spin" /> جارٍ تحميل حسابات الكافيه…</div> : overview && <>
+      <section className="simple-stats branch-stats"><div><span>فواتير الكافيه</span><strong>{formatMoney(overview.totals.invoiced_minor)}</strong><small>إيراد مفوتر · EGP</small></div><div><span>المحصّل</span><strong>{formatMoney(overview.totals.collected_minor)}</strong><small>نقد محصّل · EGP</small></div><div><span>المتبقي</span><strong>{formatMoney(overview.totals.outstanding_minor)}</strong><small>ذمم مدينة · EGP</small></div></section>
+      <section className="cafe-tiles">{overview.customers.map((customer) => <button key={customer.id} onClick={() => setSelectedId(customer.id)}><span className="cupcake-site-icon"><CircleDollarSign /></span><span><strong>{customer.name}</strong><small>{customer.invoices.length} فواتير · {customer.prices.length} أسعار خاصة</small></span><span className="balance-glance"><small>المتبقي</small><strong>{formatMoney(customer.outstanding_minor)} EGP</strong></span><ChevronLeft /></button>)}{!overview.customers.length && <EmptyState icon={CircleDollarSign} title="لا توجد حسابات كافيه" text="أضف أول كافيه وحدد أسعاره الخاصة." />}</section>
+    </>}
+  </div>;
+}
+
+function CafeCustomerForm({ form, setForm, editing, onSubmit, onCancel }: { form: CafeCustomerInput; setForm: (value: CafeCustomerInput) => void; editing: boolean; onSubmit: (event: FormEvent) => void; onCancel: () => void }) {
+  return <form className="panel inline-form cafe-customer-form" onSubmit={onSubmit}><label>كود الحساب<input className="ltr" value={form.code} onChange={(event) => setForm({ ...form, code: event.target.value })} required /></label><label>اسم الكافيه<input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} required /></label><label>بيانات التواصل<input value={form.contact ?? ''} onChange={(event) => setForm({ ...form, contact: event.target.value })} /></label><label>ملاحظات<input value={form.notes ?? ''} onChange={(event) => setForm({ ...form, notes: event.target.value })} /></label><button className="primary-button">{editing ? 'حفظ التعديل' : 'إضافة الحساب'}</button><button type="button" className="secondary-button" onClick={onCancel}>إلغاء</button></form>;
+}
+
+function KitchenPage({ data, onLoad }: { data: AdminData; onLoad: () => Promise<KitchenOverview> }) {
+  const [overview, setOverview] = useState<KitchenOverview | null>(null);
+  const [message, setMessage] = useState('');
+  useEffect(() => { let mounted = true; onLoad().then((result) => { if (mounted) setOverview(result); }).catch((caught) => { if (mounted) setMessage(friendlyError(caught)); }); return () => { mounted = false; }; }, [onLoad]);
   const ingredients = data.items.filter((item) => item.kind === 'INGREDIENT');
-  return <div className="page-stack"><section className="stats-grid compact"><StatCard label="الخامات المسجلة" value={String(ingredients.length)} note="في الكتالوج المركزي" icon={Boxes} tone="orange" /><StatCard label="تنبيهات النقص" value="—" note="بانتظار حركة المخزون" icon={AlertTriangle} tone="indigo" /><StatCard label="الهالك المسجل" value="—" note="لا توجد ورديات متزامنة" icon={ArchiveRestore} tone="blue" /></section><EmptyBusinessPage icon={ChefHat} title="بانتظار بيانات تشغيل المطبخ" text="الاستهلاك حسب وصفة الإرسال، الهالك، والجرد الفعلي سيظهرون هنا كمصادر منفصلة." chips={['رصيد الخامات', 'استهلاك الوصفات', 'الهالك المسجل', 'فروق الجرد']} /></div>;
+  const reviewCount = overview?.variances.filter((row) => BigInt(row.unexplained_variance_scaled) !== 0n).length ?? 0;
+  return <div className="page-stack">
+    {message && <div className="form-error" role="alert">{message}</div>}
+    <section className="stats-grid compact"><StatCard label="الخامات المسجلة" value={String(ingredients.length)} note="في الكتالوج المركزي" icon={Boxes} tone="orange" /><StatCard label="أرصدة متزامنة" value={String(overview?.stock.length ?? 0)} note="حسب آخر اتصال" icon={ChefHat} tone="indigo" /><StatCard label="فروق تحتاج مراجعة" value={String(reviewCount)} note="غير الهالك المسجل" icon={AlertTriangle} tone="blue" /></section>
+    {!overview ? <div className="panel mini-loading"><RefreshCw className="spin" /> جارٍ تحميل بيانات المطبخ…</div> : <section className="two-column kitchen-columns"><article className="panel table-panel"><PanelHeading title="رصيد الخامات" subtitle="الرصيد وآخر وقت مزامنة" /><div className="table-wrap"><table><thead><tr><th>الخامة</th><th>الكمية</th><th>حتى</th></tr></thead><tbody>{overview.stock.map((row) => <tr key={row.id}><td><strong>{row.name_ar}</strong><small className="cell-note ltr">{row.sku}</small></td><td>{formatQuantity(row.quantity_scaled, row.quantity_scale)} {row.unit}</td><td>{formatDate(row.as_of)}</td></tr>)}</tbody></table></div></article><article className="panel table-panel"><PanelHeading title="الهالك وفروق الجرد" subtitle="الهالك المسجل منفصل دائماً عن النقص غير المفسر" /><div className="table-wrap"><table><thead><tr><th>الخامة</th><th>هالك مسجل</th><th>فرق غير مفسر</th><th>التاريخ</th></tr></thead><tbody>{overview.variances.map((row) => <tr key={row.id}><td><strong>{row.name_ar}</strong></td><td>{formatQuantity(row.recorded_waste_scaled, row.quantity_scale)} {row.unit}</td><td><strong className={BigInt(row.unexplained_variance_scaled) > 0n ? 'price-missing' : ''}>{formatQuantity(row.unexplained_variance_scaled, row.quantity_scale)} {row.unit}</strong></td><td>{row.business_date}</td></tr>)}</tbody></table></div></article></section>}
+  </div>;
 }
 
-function ConflictsPage() {
-  return <EmptyBusinessPage icon={ClipboardCheck} title="لا توجد تعارضات مفتوحة" text="أي اختلاف بين الكمية المرسلة والمعدودة سيبقى محجوزاً ويظهر هنا لاتخاذ قرار موثق ومتابعة تطبيقه." chips={['جديد', 'بانتظار القرار', 'بانتظار تطبيق الموقع', 'تم الحل']} />;
+function ConflictsPage({ onLoad, onDecide }: { onLoad: () => Promise<QuantityConflict[]>; onDecide: (id: string, input: { expectedVersion: number; reason: string; lines: Array<{ lineId: string; finalScaled: string }> }) => Promise<void> }) {
+  const [conflicts, setConflicts] = useState<QuantityConflict[] | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [reason, setReason] = useState('');
+  const [finals, setFinals] = useState<Record<string, string>>({});
+  const [message, setMessage] = useState('');
+  const refresh = useCallback(async () => { setMessage(''); try { setConflicts(await onLoad()); } catch (caught) { setMessage(friendlyError(caught)); } }, [onLoad]);
+  useEffect(() => { void refresh(); }, [refresh]);
+  const selected = conflicts?.find((conflict) => conflict.id === selectedId) ?? null;
+  const choose = (conflict: QuantityConflict) => { setSelectedId(conflict.id); setReason(''); setFinals(Object.fromEntries(conflict.lines.map((line) => [line.id, formatQuantityInput(line.final_scaled ?? line.counted_scaled, line.quantity_scale)]))); };
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!selected) return;
+    const lines = selected.lines.map((line) => ({ lineId: line.id, finalScaled: quantityInputToScaled(finals[line.id] ?? '', line.quantity_scale) }));
+    if (lines.some((line) => line.finalScaled === null)) { setMessage('أدخل الكمية النهائية لكل صنف.'); return; }
+    setMessage('');
+    try { await onDecide(selected.id, { expectedVersion: selected.version, reason, lines: lines.map((line) => ({ lineId: line.lineId, finalScaled: line.finalScaled as string })) }); await refresh(); }
+    catch (caught) { setMessage(friendlyError(caught)); }
+  };
+  if (selected) return <div className="page-stack"><button className="back-button" onClick={() => setSelectedId(null)}>→ كل التعارضات</button><section className="branch-title"><div className="cupcake-site-icon large"><ClipboardCheck /></div><div><span>{selected.site.name}</span><h2>{selected.reference}</h2><p>تم الإبلاغ {formatDate(selected.reported_at)}</p></div><span className={`pill ${selected.status === 'OPEN' ? 'danger' : selected.status === 'PENDING_SITE_APPLY' ? 'warning' : 'success'}`}>{conflictStatusLabel(selected.status)}</span></section>{message && <div className="form-error" role="alert">{message}</div>}<section className="panel table-panel"><PanelHeading title="مقارنة الكميات" subtitle="الكمية النهائية تُرسل كقرار موثق ولا تعدل السجل الأصلي" /><div className="table-wrap"><table><thead><tr><th>الصنف</th><th>المرسل</th><th>المعدود</th><th>النهائي</th></tr></thead><tbody>{selected.lines.map((line) => <tr key={line.id}><td><strong>{line.name_ar}</strong><small className="cell-note">{line.note}</small></td><td>{formatQuantity(line.sent_scaled, line.quantity_scale)} {line.unit}</td><td>{formatQuantity(line.counted_scaled, line.quantity_scale)} {line.unit}</td><td>{selected.status === 'OPEN' ? <input className="quantity-cell" inputMode="decimal" value={finals[line.id] ?? ''} onChange={(event) => setFinals({ ...finals, [line.id]: event.target.value })} /> : `${formatQuantity(line.final_scaled ?? line.counted_scaled, line.quantity_scale)} ${line.unit}`}</td></tr>)}</tbody></table></div></section>{selected.status === 'OPEN' ? <form className="panel decision-form" onSubmit={submit}><label>سبب القرار<input value={reason} onChange={(event) => setReason(event.target.value)} minLength={3} placeholder="مثال: اعتماد الكمية المعدودة بعد مراجعة الفرع" required /></label><button className="primary-button">حفظ وإرسال القرار</button></form> : selected.decision && <section className="customer-note"><strong>قرار {selected.decision.admin_name}</strong><span>{selected.decision.reason} · {conflictApplicationLabel(selected.decision.application_status)}</span></section>}</div>;
+  return <div className="page-stack">{message && <div className="form-error" role="alert">{message}</div>}{!conflicts ? <div className="panel mini-loading"><RefreshCw className="spin" /> جارٍ تحميل التعارضات…</div> : <section className="conflict-tiles">{conflicts.map((conflict) => <button key={conflict.id} onClick={() => choose(conflict)}><span className="cupcake-site-icon"><ClipboardCheck /></span><span><strong>{conflict.reference}</strong><small>{conflict.site.name} · {conflict.lines.length} أصناف</small></span><span className={`pill ${conflict.status === 'OPEN' ? 'danger' : conflict.status === 'PENDING_SITE_APPLY' ? 'warning' : 'success'}`}>{conflictStatusLabel(conflict.status)}</span><ChevronLeft /></button>)}{!conflicts.length && <EmptyState icon={ClipboardCheck} title="لا توجد تعارضات" text="كل الكميات المستلمة متطابقة حالياً." />}</section>}</div>;
 }
 
-function TeamPage({ users, roles }: { users: User[]; roles: Role[] }) {
-  return <div className="page-stack"><section className="stats-grid compact"><StatCard label="المستخدمون" value={String(users.length)} note="حسابات مسمّاة" icon={UsersRound} tone="indigo" /><StatCard label="الأدوار" value={String(roles.length)} note="مجموعات صلاحيات" icon={ShieldCheck} tone="green" /></section><section className="panel table-panel"><PanelHeading title="المستخدمون" subtitle="لا يتم عرض كلمات المرور أو تجزئاتها" /><div className="table-wrap"><table><thead><tr><th>الاسم</th><th>اسم المستخدم</th><th>الدور</th><th>النطاق</th><th>الحالة</th></tr></thead><tbody>{users.map((user) => <tr key={user.id}><td><strong>{user.displayName}</strong></td><td className="ltr">{user.username}</td><td>{user.siteRoles.map((entry) => entry.role.name).join('، ') || 'بدون دور'}</td><td>{user.siteRoles.map((entry) => entry.site?.name || 'كل المواقع').join('، ') || '—'}</td><td><span className={`pill ${user.active ? 'success' : 'neutral'}`}>{user.active ? 'نشط' : 'موقوف'}</span></td></tr>)}</tbody></table></div></section><section className="panel role-list"><PanelHeading title="الأدوار والصلاحيات" subtitle="الصلاحيات الفعلية محفوظة على الخادم" />{roles.map((role) => <div key={role.id}><span className="role-icon"><ShieldCheck /></span><div className="grow"><strong>{role.name}</strong><small>{role.code}</small></div><span>{role.permissions.includes('*') ? 'كل الصلاحيات' : `${role.permissions.length} صلاحيات`}</span></div>)}</section></div>;
+function TeamPage({ users, roles, sites, onCreateUser, onUpdateUser, onArchiveUser, onCreateRole, onUpdateRole, onArchiveRole }: {
+  users: User[];
+  roles: Role[];
+  sites: Site[];
+  onCreateUser: (input: { username: string; displayName: string; password: string; roleId: string; siteId?: string }) => Promise<void>;
+  onUpdateUser: (id: string, input: { username?: string; displayName?: string; password?: string; active?: boolean; roleId?: string; siteId?: string }) => Promise<void>;
+  onArchiveUser: (id: string) => Promise<void>;
+  onCreateRole: (input: { code: string; name: string; permissions: string[] }) => Promise<void>;
+  onUpdateRole: (id: string, input: { code?: string; name?: string; permissions?: string[]; active?: boolean }) => Promise<void>;
+  onArchiveRole: (id: string) => Promise<void>;
+}) {
+  const [tab, setTab] = useState<'users' | 'roles'>('users');
+  const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [confirmId, setConfirmId] = useState<string | null>(null);
+  const [message, setMessage] = useState('');
+  const [userForm, setUserForm] = useState({ username: '', displayName: '', password: '', roleId: roles[0]?.id || '', siteId: '' });
+  const [roleForm, setRoleForm] = useState<{ code: string; name: string; permissions: string[] }>({ code: '', name: '', permissions: [] });
+
+  const reset = (nextTab = tab) => {
+    setEditingId(null); setMessage('');
+    setUserForm({ username: '', displayName: '', password: '', roleId: roles.find((role) => role.active !== false)?.id || '', siteId: '' });
+    setRoleForm({ code: '', name: '', permissions: [] });
+    setShowForm(false); setTab(nextTab);
+  };
+  const editUser = (user: User) => { const assignment = user.siteRoles[0]; setTab('users'); setEditingId(user.id); setUserForm({ username: user.username, displayName: user.displayName, password: '', roleId: assignment?.role.id || '', siteId: assignment?.site?.id || '' }); setShowForm(true); };
+  const editRole = (role: Role) => { setTab('roles'); setEditingId(role.id); setRoleForm({ code: role.code, name: role.name, permissions: role.permissions }); setShowForm(true); };
+  const submitUser = async (event: FormEvent) => { event.preventDefault(); setMessage(''); try { const input = { ...userForm, ...(userForm.siteId ? {} : { siteId: undefined }), ...(userForm.password ? {} : { password: undefined }) }; if (editingId) await onUpdateUser(editingId, input); else await onCreateUser({ ...userForm, ...(userForm.siteId ? {} : { siteId: undefined }) }); reset('users'); } catch (caught) { setMessage(friendlyError(caught)); } };
+  const submitRole = async (event: FormEvent) => { event.preventDefault(); setMessage(''); try { if (editingId) await onUpdateRole(editingId, roleForm); else await onCreateRole(roleForm); reset('roles'); } catch (caught) { setMessage(friendlyError(caught)); } };
+  const archive = async (id: string) => { if (confirmId !== id) { setConfirmId(id); return; } setMessage(''); try { if (tab === 'users') await onArchiveUser(id); else await onArchiveRole(id); setConfirmId(null); } catch (caught) { setMessage(friendlyError(caught)); } };
+
+  return <div className="page-stack">
+    <div className="tab-toolbar"><div><button className={tab === 'users' ? 'active' : ''} onClick={() => reset('users')}>المستخدمون <span>{users.length}</span></button><button className={tab === 'roles' ? 'active' : ''} onClick={() => reset('roles')}>الأدوار <span>{roles.length}</span></button></div><button className="primary-button" onClick={() => { setEditingId(null); setShowForm((value) => !value); }}>{tab === 'users' ? '+ مستخدم جديد' : '+ دور جديد'}</button></div>
+    {message && <div className="form-error" role="alert">{message}</div>}
+    {showForm && tab === 'users' && <form className="panel inline-form user-form" onSubmit={submitUser}><label>الاسم<input value={userForm.displayName} onChange={(event) => setUserForm({ ...userForm, displayName: event.target.value })} required /></label><label>اسم المستخدم<input className="ltr" value={userForm.username} onChange={(event) => setUserForm({ ...userForm, username: event.target.value })} required /></label><label>كلمة المرور<input type="password" value={userForm.password} onChange={(event) => setUserForm({ ...userForm, password: event.target.value })} required={!editingId} minLength={editingId ? undefined : 12} placeholder={editingId ? 'اتركها فارغة دون تغيير' : '١٢ حرفاً على الأقل'} /></label><label>الدور<select value={userForm.roleId} onChange={(event) => setUserForm({ ...userForm, roleId: event.target.value })} required>{roles.filter((role) => role.active !== false).map((role) => <option value={role.id} key={role.id}>{role.name}</option>)}</select></label><label>نطاق الموقع<select value={userForm.siteId} onChange={(event) => setUserForm({ ...userForm, siteId: event.target.value })}><option value="">كل المواقع</option>{sites.filter((site) => site.active).map((site) => <option value={site.id} key={site.id}>{site.name}</option>)}</select></label><button className="primary-button">{editingId ? 'حفظ' : 'إضافة'}</button></form>}
+    {showForm && tab === 'roles' && <form className="panel role-editor" onSubmit={submitRole}><div className="inline-form role-name-fields"><label>الكود<input className="ltr" value={roleForm.code} onChange={(event) => setRoleForm({ ...roleForm, code: event.target.value })} required /></label><label>اسم الدور<input value={roleForm.name} onChange={(event) => setRoleForm({ ...roleForm, name: event.target.value })} required /></label></div><fieldset><legend>اختَر ما يستطيع هذا الدور فعله</legend><div className="permission-grid">{permissionOptions.map((permission) => <label key={permission.code} className={roleForm.permissions.includes(permission.code) ? 'selected' : ''}><input type="checkbox" checked={roleForm.permissions.includes(permission.code)} onChange={(event) => { const next = event.target.checked ? [...roleForm.permissions.filter((code) => permission.code === '*' || code !== '*'), permission.code] : roleForm.permissions.filter((code) => code !== permission.code); setRoleForm({ ...roleForm, permissions: permission.code === '*' && event.target.checked ? ['*'] : next }); }} /><span><strong>{permission.label}</strong><small className="ltr">{permission.code}</small></span></label>)}</div></fieldset><div className="form-actions"><button className="primary-button">{editingId ? 'حفظ الصلاحيات' : 'إضافة الدور'}</button><button type="button" className="secondary-button" onClick={() => reset('roles')}>إلغاء</button></div></form>}
+    {tab === 'users' ? <section className="panel table-panel"><PanelHeading title="المستخدمون" subtitle="حسابات مسمّاة؛ لا تُعرض كلمات المرور أو تجزئاتها" /><div className="table-wrap"><table><thead><tr><th>الاسم</th><th>اسم المستخدم</th><th>الدور</th><th>النطاق</th><th>الحالة</th><th>إجراءات</th></tr></thead><tbody>{users.map((user) => <tr key={user.id}><td><strong>{user.displayName}</strong></td><td className="ltr">{user.username}</td><td>{user.siteRoles.map((entry) => entry.role.name).join('، ') || 'بدون دور'}</td><td>{user.siteRoles.map((entry) => entry.site?.name || 'كل المواقع').join('، ') || '—'}</td><td><span className={`pill ${user.active ? 'success' : 'neutral'}`}>{user.active ? 'نشط' : 'موقوف'}</span></td><td><div className="row-actions"><button onClick={() => editUser(user)}>تعديل</button><button disabled={!user.active} className={confirmId === user.id ? 'confirm-delete' : ''} onClick={() => void archive(user.id)}>{confirmId === user.id ? 'تأكيد' : 'إيقاف'}</button></div></td></tr>)}</tbody></table></div></section> : <section className="panel role-list"><PanelHeading title="الأدوار والصلاحيات" subtitle="صلاحيات واضحة قابلة للتعديل وتُخزن على الخادم" />{roles.map((role) => <div key={role.id}><span className="role-icon"><ShieldCheck /></span><div className="grow"><strong>{role.name}</strong><small>{role.code}</small><div className="permission-chips">{role.permissions.includes('*') ? <span>كل صلاحيات النظام</span> : role.permissions.slice(0, 4).map((permission) => <span key={permission}>{permissionLabel(permission)}</span>)}{role.permissions.length > 4 && <span>+{role.permissions.length - 4}</span>}</div></div><span className={`pill ${role.active !== false ? 'success' : 'neutral'}`}>{role.active !== false ? 'نشط' : 'مؤرشف'}</span><div className="row-actions"><button onClick={() => editRole(role)}>تعديل</button><button disabled={role.active === false} className={confirmId === role.id ? 'confirm-delete' : ''} onClick={() => void archive(role.id)}>{confirmId === role.id ? 'تأكيد' : 'أرشفة'}</button></div></div>)}</section>}
+  </div>;
 }
 
-function OperationsPage({ data }: { data: AdminData }) {
+function OperationsPage({ data, onIssueEnrollmentToken }: { data: AdminData; onIssueEnrollmentToken: (siteId: string) => Promise<{ id: string; token: string; siteId: string; profile: SiteType; expiresAt: string }> }) {
   const [touchInstallers, setTouchInstallers] = useState<Record<SiteType, boolean>>({ BRANCH_TYPE_1: false, BRANCH_TYPE_2: false, KITCHEN: true });
+  const [enrollment, setEnrollment] = useState<{ token: string; siteId: string; expiresAt: string } | null>(null);
+  const [busySite, setBusySite] = useState<string | null>(null);
+  const [message, setMessage] = useState('');
   const profiles: SiteType[] = ['BRANCH_TYPE_1', 'BRANCH_TYPE_2', 'KITCHEN'];
   return <div className="page-stack">
+    <section className="panel enrollment-panel"><PanelHeading title="تسجيل جهاز جديد" subtitle="رمز واحد صالح لمدة ٣٠ دقيقة ولا يظهر مرة أخرى" /><div className="enrollment-sites">{data.sites.filter((site) => site.active).map((site) => <button key={site.id} disabled={busySite === site.id} onClick={async () => { setBusySite(site.id); setMessage(''); try { const result = await onIssueEnrollmentToken(site.id); setEnrollment(result); } catch (caught) { setMessage(friendlyError(caught)); } finally { setBusySite(null); } }}><span className="site-icon"><MonitorSmartphone /></span><span><strong>{site.name}</strong><small>{siteTypeLabels[site.type]}</small></span><span>إنشاء رمز</span></button>)}</div>{message && <div className="form-error">{message}</div>}{enrollment && <div className="one-time-token"><div><strong>رمز التسجيل</strong><small>ينتهي {formatDate(enrollment.expiresAt)}</small></div><code>{enrollment.token}</code><button className="secondary-button" onClick={() => { void navigator.clipboard.writeText(enrollment.token); }}>نسخ الرمز</button></div>}</section>
     <section className="panel table-panel"><PanelHeading title="الأجهزة والمزامنة" subtitle="حالة التسجيل وآخر اتصال لكل جهاز" /><div className="table-wrap"><table><thead><tr><th>الجهاز</th><th>الموقع</th><th>الملف</th><th>التسجيل</th><th>آخر ظهور</th><th>الإصدار</th></tr></thead><tbody>{data.devices.map((device) => <tr key={device.id}><td className="ltr">{device.id.slice(0, 8)}</td><td>{data.sites.find((site) => site.id === device.siteId)?.name || 'موقع غير معروف'}</td><td>{siteTypeLabels[device.profile]}</td><td><span className={`pill ${device.enrollmentStatus === 'ENROLLED' ? 'success' : device.enrollmentStatus === 'REVOKED' ? 'danger' : 'warning'}`}>{device.enrollmentStatus === 'ENROLLED' ? 'مسجل' : device.enrollmentStatus === 'REVOKED' ? 'ملغي' : 'بانتظار التسجيل'}</span></td><td>{device.lastSeenAt ? formatDate(device.lastSeenAt) : 'لم يتصل بعد'}</td><td>{device.appVersion || '—'}</td></tr>)}</tbody></table></div>{!data.devices.length && <EmptyState icon={MonitorSmartphone} title="لا توجد أجهزة" text="سيظهر الجهاز بعد إصدار رمز تسجيل لأحد المواقع." />}</section>
     <section className="two-column">
       <article className="panel backup-panel"><PanelHeading title="النسخ الاحتياطي" subtitle="PostgreSQL وسجل الملفات التشغيلية" /><div className="backup-visual"><DatabaseBackup size={34} /><div><strong>لم تُسجل نسخة خارجية بعد</strong><p>يلزم تحديد وجهة VPS مشفّرة وسياسة الاحتفاظ قبل التفعيل.</p></div></div><dl className="detail-list"><div><dt>قاعدة البيانات</dt><dd><span className="status-good">جاهزة</span></dd></div><div><dt>الهدف المقترح</dt><dd>RPO ساعة / RTO ٤ ساعات</dd></div><div><dt>اختبار الاستعادة</dt><dd>بانتظار إعداد الوجهة</dd></div></dl><button className="secondary-button" disabled>تشغيل نسخة الآن</button></article>
@@ -421,11 +839,6 @@ function OperationsPage({ data }: { data: AdminData }) {
     </section>
     <section className="panel installers"><PanelHeading title="تطبيقات نقاط التشغيل" subtitle="اختَر نمط الواجهة قبل تنزيل المثبت المناسب" /><div className="installer-grid">{profiles.map((profile) => <article key={profile}><div className="installer-icon"><Download /></div><div><h3>{siteTypeLabels[profile]}</h3><p>Windows x64 · قناة مستقرة</p></div><label className="switch-row"><input type="checkbox" checked={touchInstallers[profile]} onChange={(event) => setTouchInstallers({ ...touchInstallers, [profile]: event.target.checked })} /><span className="switch" /><span>تهيئة شاشة لمس</span></label><button className="secondary-button" disabled><Download size={17} /> الإصدار قيد التجهيز</button></article>)}</div><p className="installer-note"><ShieldCheck size={17} /> المثبتات المنشورة ستكون موقعة، محددة الملف، ولا تحتوي بيانات فرع أو أسرار أو نسخة قاعدة بيانات.</p></section>
   </div>;
-}
-
-function EmptyBusinessPage({ icon, title, text, chips }: { icon: LucideIcon; title: string; text: string; chips: string[] }) {
-  const Icon = icon;
-  return <section className="panel business-empty"><div className="business-empty-icon"><Icon /></div><h2>{title}</h2><p>{text}</p><div className="chip-row">{chips.map((chip) => <span key={chip}>{chip}</span>)}</div><div className="sync-await"><Cloud size={19} /><span>هذه الشاشة جاهزة لاستقبال البيانات من عقد Contract v1</span></div></section>;
 }
 
 function StatCard({ label, value, note, icon, tone }: { label: string; value: string; note: string; icon: LucideIcon; tone: string }) {
@@ -452,6 +865,58 @@ function LoadingPage() {
 
 function formatDate(value: string) {
   return new Intl.DateTimeFormat('ar-EG', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Africa/Cairo' }).format(new Date(value));
+}
+
+function formatMoney(minorUnits: string) {
+  return new Intl.NumberFormat('ar-EG', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(minorUnits) / 100);
+}
+
+function moneyMinorToInput(minorUnits: number) {
+  return (minorUnits / 100).toFixed(2);
+}
+
+function moneyInputToMinor(value: string): number | null {
+  const normalized = value.trim().replace(',', '.');
+  if (!/^\d+(?:\.\d{1,2})?$/.test(normalized)) return null;
+  const [whole, fraction = ''] = normalized.split('.');
+  const minor = Number(whole) * 100 + Number(fraction.padEnd(2, '0'));
+  return Number.isSafeInteger(minor) && minor <= 2_000_000_000 ? minor : null;
+}
+
+function formatQuantity(scaledValue: string, scale: number) {
+  return new Intl.NumberFormat('ar-EG', { maximumFractionDigits: Math.max(0, Math.ceil(Math.log10(scale))) }).format(Number(scaledValue) / scale);
+}
+
+function formatQuantityInput(scaledValue: string, scale: number) {
+  return String(Number(scaledValue) / scale);
+}
+
+function quantityInputToScaled(value: string, scale: number): string | null {
+  const normalized = value.trim().replace(',', '.');
+  if (!/^\d+(?:\.\d+)?$/.test(normalized)) return null;
+  const scaled = Math.round(Number(normalized) * scale);
+  return Number.isSafeInteger(scaled) && scaled >= 0 ? String(scaled) : null;
+}
+
+function conflictStatusLabel(status: QuantityConflict['status']) {
+  return status === 'OPEN' ? 'يحتاج قراراً' : status === 'PENDING_SITE_APPLY' ? 'بانتظار تطبيق الموقع' : 'تم الحل';
+}
+
+function conflictApplicationLabel(status: NonNullable<QuantityConflict['decision']>['application_status']) {
+  const labels = { CREATED: 'تم إنشاء الأمر', DELIVERED: 'وصل للموقع', APPLIED: 'طُبق محلياً', REJECTED: 'تعذر التطبيق' } as const;
+  return labels[status];
+}
+
+function locationLabel(location: BranchOverview['stock'][number]['location']) {
+  const labels: Record<BranchOverview['stock'][number]['location'], string> = {
+    SALEABLE: 'متاح للبيع',
+    FREEZER: 'الفريزر',
+    DISPLAY: 'العرض',
+    KITCHEN: 'المطبخ',
+    HOLD: 'محجوز',
+    TRANSIT: 'في الطريق',
+  };
+  return labels[location];
 }
 
 export default App;

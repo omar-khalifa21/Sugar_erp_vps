@@ -1,0 +1,20 @@
+{
+  "contract_version": "1.0",
+  "stream_epoch": 1,
+  "events": [
+    {
+      "id": "6ee5d5e8-41a1-4b0f-8f41-4929161cb267",
+      "device_sequence": 1,
+      "event_type": "shift.opened",
+      "schema_version": 1,
+      "occurred_at": "2026-09-09T18:00:00.000Z",
+      "payload": {
+        "shift_id": "5be40b6c-c52b-4cd6-bf47-dc9ab62507dd",
+        "kind": "MORNING",
+        "business_date": "2026-09-09"
+      },
+      "dependencies": [],
+      "content_hash": "88d2f6416c582925115c1d152c832dc6defada3e27605f9a7ea741ff463808df"
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 import { Injectable, UnprocessableEntityException } from '@nestjs/common';
-import { Device, EnrollmentStatus } from '@prisma/client';
+import { EnrollmentStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateDeviceDto } from './create-device.dto';
 
@@ -7,11 +7,11 @@ import { CreateDeviceDto } from './create-device.dto';
 export class DevicesService {
   constructor(private readonly prisma: PrismaService) {}
 
-  list(): Promise<Device[]> {
-    return this.prisma.device.findMany({ orderBy: { createdAt: 'desc' } });
+  list(): Promise<SafeDevice[]> {
+    return this.prisma.device.findMany({ select: safeDeviceSelect, orderBy: { createdAt: 'desc' } });
   }
 
-  async create(input: CreateDeviceDto): Promise<Device> {
+  async create(input: CreateDeviceDto): Promise<SafeDevice> {
     const site = await this.prisma.site.findUniqueOrThrow({ where: { id: input.siteId } });
     if (site.type !== input.profile) {
       throw new UnprocessableEntityException('Device profile must match the site type');
@@ -23,6 +23,37 @@ export class DevicesService {
         activeWriter: input.activeWriter || false,
         enrollmentStatus: EnrollmentStatus.PENDING,
       },
+      select: safeDeviceSelect,
+    });
+  }
+
+  revoke(id: string): Promise<SafeDevice> {
+    return this.prisma.device.update({
+      where: { id },
+      data: {
+        enrollmentStatus: EnrollmentStatus.REVOKED,
+        activeWriter: false,
+        credentialHash: null,
+        streamEpoch: { increment: 1 },
+      },
+      select: safeDeviceSelect,
     });
   }
 }
+
+export const safeDeviceSelect = {
+  id: true,
+  siteId: true,
+  profile: true,
+  enrollmentStatus: true,
+  keyThumbprint: true,
+  activeWriter: true,
+  lastSeenAt: true,
+  appVersion: true,
+  streamEpoch: true,
+  name: true,
+  createdAt: true,
+  updatedAt: true,
+} satisfies Prisma.DeviceSelect;
+
+export type SafeDevice = Prisma.DeviceGetPayload<{ select: typeof safeDeviceSelect }>;
