@@ -15,6 +15,7 @@ describe('Contract v1 sync (PostgreSQL integration)', () => {
   let deviceId: string;
   let deviceSecret: string;
   let siteId: string;
+  let kitchenSiteId: string;
   const username = `sync-admin-${randomUUID().slice(0, 8)}`;
   const siteCode = `SYNC-${randomUUID().slice(0, 8)}`.toUpperCase();
   const thumbprint = randomUUID().replaceAll('-', '').repeat(2);
@@ -46,6 +47,11 @@ describe('Contract v1 sync (PostgreSQL integration)', () => {
   }, 120_000);
 
   afterAll(async () => {
+    if (kitchenSiteId) {
+      await prisma.enrollmentToken.deleteMany({ where: { siteId: kitchenSiteId } });
+      await prisma.device.deleteMany({ where: { siteId: kitchenSiteId } });
+      await prisma.site.delete({ where: { id: kitchenSiteId } });
+    }
     if (siteId) {
       await prisma.syncEvent.deleteMany({ where: { siteId } });
       await prisma.enrollmentToken.deleteMany({ where: { siteId } });
@@ -149,6 +155,14 @@ describe('Contract v1 sync (PostgreSQL integration)', () => {
     const secondBase = { ...dependencyBase, dependencies: [first.id] };
     await push([{ ...secondBase, content_hash: computeEventHash(secondBase) }]).expect(200);
 
+    await request(app.getHttpServer()).get(`/api/v1/admin/sites/${siteId}/sales`).expect(401);
+    const salesView = await request(app.getHttpServer())
+      .get(`/api/v1/admin/sites/${siteId}/sales`)
+      .set('Authorization', `Bearer ${bearer}`)
+      .expect(200);
+    const visibleSales = salesView.body as Array<{ event_id: string; site_id: string }>;
+    expect(visibleSales.some((sale) => sale.event_id === secondBase.id && sale.site_id === siteId)).toBe(true);
+
     const pulled = await request(app.getHttpServer())
       .get('/api/v1/sync/pull?limit=100')
       .set(headers)
@@ -160,5 +174,60 @@ describe('Contract v1 sync (PostgreSQL integration)', () => {
       .set(headers)
       .send({ cursor: pulled.body.cursor })
       .expect(200);
+  });
+
+  it('routes an accepted branch request to the kitchen and exposes an admin-only read view', async () => {
+    const kitchen = await request(app.getHttpServer())
+      .post('/api/v1/sites')
+      .set('Authorization', `Bearer ${bearer}`)
+      .send({ code: `KIT-${randomUUID().slice(0, 8)}`.toUpperCase(), name: 'Integration Kitchen', type: 'KITCHEN' })
+      .expect(201);
+    kitchenSiteId = kitchen.body.id as string;
+    const issued = await request(app.getHttpServer())
+      .post(`/api/v1/sites/${kitchenSiteId}/enrollment-tokens`)
+      .set('Authorization', `Bearer ${bearer}`)
+      .send({ expiresInMinutes: 30 })
+      .expect(201);
+    const kitchenDevice = await request(app.getHttpServer())
+      .post('/api/v1/enrollment')
+      .send({
+        token: issued.body.token,
+        deviceName: 'Integration kitchen writer',
+        keyThumbprint: randomUUID().replaceAll('-', '').repeat(2),
+        appVersion: '1.0.0-test',
+      })
+      .expect(201);
+
+    const requestId = randomUUID();
+    const submitted = {
+      id: randomUUID(),
+      device_sequence: 3,
+      event_type: 'kitchen_request.submitted',
+      schema_version: 1,
+      occurred_at: '2026-09-09T19:00:00.000Z',
+      payload: { request_id: requestId, business_date: '2026-09-09', version: 1, lines: [] },
+      dependencies: [] as string[],
+    };
+    await request(app.getHttpServer())
+      .post('/api/v1/sync/push')
+      .set({ 'x-device-id': deviceId, 'x-device-secret': deviceSecret })
+      .send({ contract_version: '1.0', stream_epoch: 1, events: [{ ...submitted, content_hash: computeEventHash(submitted) }] })
+      .expect(200);
+
+    const pulled = await request(app.getHttpServer())
+      .get('/api/v1/sync/pull?limit=100')
+      .set({ 'x-device-id': kitchenDevice.body.device.id, 'x-device-secret': kitchenDevice.body.credential })
+      .expect(200);
+    const kitchenEvents = pulled.body.events as Array<{ id: string; origin_site_id: string }>;
+    expect(kitchenEvents.map((event) => event.id)).toContain(submitted.id);
+    expect(kitchenEvents.find((event) => event.id === submitted.id)?.origin_site_id).toBe(siteId);
+
+    await request(app.getHttpServer()).get('/api/v1/admin/kitchen/requests').expect(401);
+    const view = await request(app.getHttpServer())
+      .get('/api/v1/admin/kitchen/requests')
+      .set('Authorization', `Bearer ${bearer}`)
+      .expect(200);
+    const visibleRequests = view.body as Array<{ request: { request_id: string } }>;
+    expect(visibleRequests.some((entry) => entry.request.request_id === requestId)).toBe(true);
   });
 });

@@ -1,5 +1,6 @@
-import { Body, Controller, Get, Headers, HttpCode, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common';
 import { Public } from '../common/public.decorator';
+import { Roles } from '../common/roles.decorator';
 import { SyncAckDto, SyncPullQueryDto, SyncPushDto } from './sync.dto';
 import { SyncService } from './sync.service';
 
@@ -35,5 +36,32 @@ export class SyncController {
     @Body() input: SyncAckDto,
   ) {
     return this.sync.acknowledge(deviceId, credential, input.cursor);
+  }
+}
+
+@Roles('ADMIN')
+@Controller('admin/kitchen')
+export class KitchenRequestReadController {
+  constructor(private readonly sync: SyncService) {}
+
+  @Get('requests')
+  requests() {
+    return this.sync.listKitchenRequests();
+  }
+}
+
+@Roles('ADMIN')
+@Controller('admin/sites/:siteId')
+export class SiteEventReadController {
+  constructor(private readonly sync: SyncService) {}
+
+  @Get('sales')
+  sales(@Param('siteId', ParseUUIDPipe) siteId: string) {
+    return this.sync.listSiteSales(siteId);
+  }
+
+  @Get('shift-closes')
+  shifts(@Param('siteId', ParseUUIDPipe) siteId: string) {
+    return this.sync.listSiteShiftCloses(siteId);
   }
 }

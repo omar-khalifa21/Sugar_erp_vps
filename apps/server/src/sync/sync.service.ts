@@ -1,6 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import { HttpException, Injectable, UnauthorizedException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { DeviceProfile, Prisma, SiteType } from '@prisma/client';
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { DeviceAuthService } from './device-auth.service';
@@ -50,6 +50,28 @@ export class SyncService {
             accepted.push({ id: event.id, status: 'duplicate', server_position: existing.serverPosition.toString() });
             acceptedInBatch.add(event.id);
             continue;
+          }
+          if (event.event_type === 'kitchen_request.submitted') {
+            if (device.profile === DeviceProfile.KITCHEN) {
+              throw contractError(403, 'WRONG_PROFILE', 'Only a branch can submit a kitchen request', false);
+            }
+            const kitchenCount = await transaction.site.count({ where: { type: SiteType.KITCHEN, active: true } });
+            if (kitchenCount !== 1) {
+              throw contractError(409, 'KITCHEN_ROUTE_UNAVAILABLE', 'Exactly one active kitchen is required to route this request', true);
+            }
+          }
+          if (event.event_type === 'shipment.dispatched') {
+            if (device.profile !== DeviceProfile.KITCHEN) {
+              throw contractError(403, 'WRONG_PROFILE', 'Only a kitchen can dispatch a shipment', false);
+            }
+            const destination = event.payload.destination_site_id;
+            if (typeof destination !== 'string' || !/^[0-9a-f-]{36}$/i.test(destination)) {
+              throw contractError(422, 'INVALID_DESTINATION', 'Shipment destination is missing or invalid', false);
+            }
+            const branch = await transaction.site.findUnique({ where: { id: destination } });
+            if (!branch?.active || branch.type === SiteType.KITCHEN) {
+              throw contractError(422, 'INVALID_DESTINATION', 'Shipment destination must be an active branch', false);
+            }
           }
           if (event.device_sequence !== expected) {
             throw contractError(
@@ -106,8 +128,24 @@ export class SyncService {
     const device = await this.deviceAuth.authenticate(deviceId, credential);
     const after = cursor ? this.decodeCursor(cursor, device.id) : 0n;
     const limit = requestedLimit ?? 100;
+    const routes: Prisma.SyncEventWhereInput[] = [{ siteId: device.siteId }];
+    if (device.profile === DeviceProfile.KITCHEN) {
+      // Requests are owned by branch writers, but must reach the kitchen feed.
+      routes.push({
+        eventType: 'kitchen_request.submitted',
+        site: { type: { in: [SiteType.BRANCH_TYPE_1, SiteType.BRANCH_TYPE_2] } },
+      });
+    } else {
+      // Kitchen dispatches are visible only to the addressed branch. Do not
+      // broadcast them to every branch or trust a free-form site id alone.
+      routes.push({
+        eventType: 'shipment.dispatched',
+        site: { type: SiteType.KITCHEN },
+        payload: { path: ['destination_site_id'], equals: device.siteId },
+      });
+    }
     const rows = await this.prisma.syncEvent.findMany({
-      where: { siteId: device.siteId, serverPosition: { gt: after } },
+      where: { OR: routes, serverPosition: { gt: after } },
       orderBy: { serverPosition: 'asc' },
       take: limit + 1,
     });
@@ -135,6 +173,54 @@ export class SyncService {
         server_position: event.serverPosition.toString(),
       })),
     };
+  }
+
+  async listKitchenRequests() {
+    const events = await this.prisma.syncEvent.findMany({
+      where: { eventType: 'kitchen_request.submitted', site: { type: { in: [SiteType.BRANCH_TYPE_1, SiteType.BRANCH_TYPE_2] } } },
+      include: { site: { select: { id: true, name: true, type: true } } },
+      orderBy: { serverPosition: 'desc' },
+      take: 200,
+    });
+    const latest = new Map<string, (typeof events)[number]>();
+    for (const event of events) {
+      const payload = event.payload as Record<string, unknown>;
+      const requestId = typeof payload.request_id === 'string' ? payload.request_id : event.id;
+      if (!latest.has(requestId)) latest.set(requestId, event);
+    }
+    return [...latest.values()].map((event) => ({
+      event_id: event.id,
+      source_site: event.site,
+      received_at: event.receivedAt.toISOString(),
+      as_of: event.receivedAt.toISOString(),
+      request: event.payload,
+    }));
+  }
+
+  async listSiteSales(siteId: string) {
+    return this.readSiteEvents(siteId, 'sale.completed');
+  }
+
+  async listSiteShiftCloses(siteId: string) {
+    return this.readSiteEvents(siteId, 'shift.closed');
+  }
+
+  private async readSiteEvents(siteId: string, eventType: string) {
+    const events = await this.prisma.syncEvent.findMany({
+      where: { siteId, eventType },
+      orderBy: { serverPosition: 'desc' },
+      take: 200,
+      select: { id: true, deviceId: true, occurredAt: true, receivedAt: true, payload: true },
+    });
+    return events.map((event) => ({
+      event_id: event.id,
+      site_id: siteId,
+      device_id: event.deviceId,
+      occurred_at: event.occurredAt.toISOString(),
+      received_at: event.receivedAt.toISOString(),
+      as_of: event.receivedAt.toISOString(),
+      data: event.payload,
+    }));
   }
 
   async acknowledge(deviceId: string | undefined, credential: string | undefined, cursor: string) {

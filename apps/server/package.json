@@ -16,12 +16,12 @@
     "seed:dev": "tsx prisma/seed-dev.ts"
   },
   "dependencies": {
-    "@nestjs/common": "11.1.6",
-    "@nestjs/config": "4.0.2",
-    "@nestjs/core": "11.1.6",
+    "@nestjs/common": "11.2.3",
+    "@nestjs/config": "4.0.4",
+    "@nestjs/core": "11.2.3",
     "@nestjs/jwt": "11.0.1",
     "@nestjs/passport": "11.0.5",
-    "@nestjs/platform-express": "11.1.6",
+    "@nestjs/platform-express": "11.2.3",
     "@prisma/client": "^6.16.2",
     "argon2": "0.44.0",
     "class-transformer": "0.5.1",
