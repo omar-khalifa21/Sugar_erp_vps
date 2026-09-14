@@ -5,13 +5,15 @@ services:
     image: postgres:17.6-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_DB: sugar_erp
-      POSTGRES_USER: sugar_erp
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in the server-only .env}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in the server-only .env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the server-only environment}
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U sugar_erp -d sugar_erp"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -19,11 +21,12 @@ services:
 
   migrate:
     build:
-      context: .
+      context: ..
+      dockerfile: deploy/backend/Dockerfile
       target: build
     command: npm run prisma:migrate:deploy
     environment:
-      DATABASE_URL: postgresql://sugar_erp:${POSTGRES_PASSWORD}@postgres:5432/sugar_erp?schema=public
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL with host postgres in the server-only .env}
     depends_on:
       postgres:
         condition: service_healthy
@@ -32,11 +35,12 @@ services:
 
   api:
     build:
-      context: .
+      context: ..
+      dockerfile: deploy/backend/Dockerfile
       target: runtime
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql://sugar_erp:${POSTGRES_PASSWORD}@postgres:5432/sugar_erp?schema=public
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL with host postgres in the server-only .env}
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in the server-only environment}
       JWT_EXPIRES_IN: 15m
       PORT: 3000
@@ -57,8 +61,8 @@ services:
 
   web:
     build:
-      context: .
-      target: web
+      context: ..
+      dockerfile: deploy/web/Dockerfile
     restart: unless-stopped
     ports:
       - "127.0.0.1:4173:80"
@@ -68,21 +72,6 @@ services:
       timeout: 5s
       retries: 5
     networks: [backend]
-
-  integration-test:
-    profiles: [test]
-    build:
-      context: .
-      target: build
-    command: sh -c "npm run prisma:migrate:deploy && npm run test:integration"
-    environment:
-      DATABASE_URL: postgresql://sugar_erp:${POSTGRES_PASSWORD}@postgres:5432/sugar_erp_test?schema=public
-      JWT_SECRET: ${JWT_SECRET}
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks: [backend]
-    restart: "no"
 
 volumes:
   postgres-data:

@@ -22,6 +22,7 @@ services:
   migrate:
     build:
       context: .
+      dockerfile: deploy/backend/Dockerfile
       target: development
     command: npm run prisma:migrate:deploy
     environment:
@@ -36,6 +37,7 @@ services:
   seed:
     build:
       context: .
+      dockerfile: deploy/backend/Dockerfile
       target: development
     command: npm run seed:dev
     environment:
@@ -54,6 +56,7 @@ services:
   api:
     build:
       context: .
+      dockerfile: deploy/backend/Dockerfile
       target: development
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-sugar_erp}:${POSTGRES_PASSWORD:-local-development-password}@postgres:5432/${POSTGRES_DB:-sugar_erp}?schema=public
@@ -80,6 +83,7 @@ services:
   admin-web:
     build:
       context: .
+      dockerfile: deploy/backend/Dockerfile
       target: development
     command: npm run dev --workspace @sugar-erp/admin-web
     environment:
@@ -96,6 +100,7 @@ services:
     profiles: [test]
     build:
       context: .
+      dockerfile: deploy/backend/Dockerfile
       target: development
     command: npm run test:integration
     environment:

@@ -17,9 +17,6 @@ FROM dependencies AS build
 COPY . .
 RUN npm run prisma:generate && npm run build
 
-FROM nginx:1.29.1-alpine AS web
-COPY --from=build /workspace/apps/admin-web/dist /usr/share/nginx/html
-
 FROM node:22.19.0-alpine AS production-dependencies
 WORKDIR /workspace
 ENV NODE_ENV=production
