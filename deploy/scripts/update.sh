@@ -14,7 +14,7 @@ cd "$ROOT"
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" config --quiet
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" build api web migrate
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" run --rm migrate
-docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --no-build api web
+docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --no-build --force-recreate api web
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ps
 for url in http://127.0.0.1:3000/api/v1/ready http://127.0.0.1:4173/; do
     ready=0
