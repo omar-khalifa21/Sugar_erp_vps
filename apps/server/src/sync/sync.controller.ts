@@ -9,23 +9,30 @@ import { SyncService } from './sync.service';
 export class SyncController {
   constructor(private readonly sync: SyncService) {}
 
+  @Get('bootstrap')
+  bootstrap(@Headers('x-device-id') deviceId: string | undefined, @Headers('x-device-secret') credential: string | undefined, @Headers('x-app-version') appVersion: string | undefined) {
+    return this.sync.bootstrap(deviceId, credential, appVersion);
+  }
+
   @Post('push')
   @HttpCode(200)
   push(
     @Headers('x-device-id') deviceId: string | undefined,
     @Headers('x-device-secret') credential: string | undefined,
+    @Headers('x-app-version') appVersion: string | undefined,
     @Body() input: SyncPushDto,
   ) {
-    return this.sync.push(deviceId, credential, input);
+    return this.sync.push(deviceId, credential, input, appVersion);
   }
 
   @Get('pull')
   pull(
     @Headers('x-device-id') deviceId: string | undefined,
     @Headers('x-device-secret') credential: string | undefined,
+    @Headers('x-app-version') appVersion: string | undefined,
     @Query() query: SyncPullQueryDto,
   ) {
-    return this.sync.pull(deviceId, credential, query.cursor, query.limit);
+    return this.sync.pull(deviceId, credential, query.cursor, query.limit, appVersion);
   }
 
   @Post('ack')
@@ -33,9 +40,10 @@ export class SyncController {
   acknowledge(
     @Headers('x-device-id') deviceId: string | undefined,
     @Headers('x-device-secret') credential: string | undefined,
+    @Headers('x-app-version') appVersion: string | undefined,
     @Body() input: SyncAckDto,
   ) {
-    return this.sync.acknowledge(deviceId, credential, input.cursor);
+    return this.sync.acknowledge(deviceId, credential, input.cursor, appVersion);
   }
 }
 
@@ -47,6 +55,11 @@ export class KitchenRequestReadController {
   @Get('requests')
   requests() {
     return this.sync.listKitchenRequests();
+  }
+
+  @Get('shipments')
+  shipments() {
+    return this.sync.listShipments();
   }
 }
 

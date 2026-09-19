@@ -8,7 +8,7 @@
     "start:dev": "nest start --watch",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "lint": "eslint \"{src,test}/**/*.ts\" --max-warnings=0",
-    "test": "jest --config jest.config.ts",
+    "test": "jest --config jest.config.ts --runInBand",
     "test:integration": "jest --config test/jest-integration.config.ts --runInBand",
     "typecheck": "tsc --noEmit",
     "prisma:generate": "prisma generate",

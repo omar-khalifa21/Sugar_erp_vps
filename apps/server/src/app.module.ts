@@ -15,6 +15,7 @@ import { UsersModule } from './users/users.module';
 import { EnrollmentModule } from './enrollment/enrollment.module';
 import { SyncModule } from './sync/sync.module';
 import { AdminModule } from './admin/admin.module';
+import { ReleasesModule } from './releases/releases.module';
 
 function validateEnvironment(config: Record<string, unknown>): Record<string, unknown> {
   if (!config.DATABASE_URL) throw new Error('DATABASE_URL is required');
@@ -26,7 +27,11 @@ function validateEnvironment(config: Record<string, unknown>): Record<string, un
 
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true, validate: validateEnvironment }),
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: process.env.NODE_ENV === 'test' ? ['../../.env', '.env'] : ['.env'],
+      validate: validateEnvironment,
+    }),
     PrismaModule,
     AuthModule,
     HealthModule,
@@ -38,6 +43,7 @@ function validateEnvironment(config: Record<string, unknown>): Record<string, un
     EnrollmentModule,
     SyncModule,
     AdminModule,
+    ReleasesModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: JwtAuthGuard },

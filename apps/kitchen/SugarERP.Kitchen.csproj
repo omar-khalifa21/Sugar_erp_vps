@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>WinExe</OutputType><TargetFramework>net9.0</TargetFramework><AssemblyName>SugarERP.Kitchen.Desktop</AssemblyName><ApplicationIcon>Assets\sugar.ico</ApplicationIcon><AvaloniaUseCompiledBindingsByDefault>false</AvaloniaUseCompiledBindingsByDefault></PropertyGroup>
+  <ItemGroup><AvaloniaResource Include="Assets\**" /></ItemGroup>
+  <ItemGroup><ProjectReference Include="..\..\src\SugarERP.Kitchen\SugarERP.Kitchen.csproj" /><ProjectReference Include="..\..\src\SugarERP.Desktop.Shared\SugarERP.Desktop.Shared.csproj" /><PackageReference Include="Avalonia" ExcludeAssets="analyzers" /><PackageReference Include="Avalonia.Desktop" /><PackageReference Include="Avalonia.Controls.DataGrid" /><PackageReference Include="Avalonia.Fonts.Inter" /><PackageReference Include="Avalonia.Themes.Fluent" /></ItemGroup>
+  <Target Name="RemoveIncompatibleAvaloniaAnalyzers" BeforeTargets="CoreCompile"><ItemGroup><Analyzer Remove="@(Analyzer)" Condition="$([System.String]::Copy('%(Analyzer.FileName)').StartsWith('Avalonia.'))" /></ItemGroup></Target>
+</Project>

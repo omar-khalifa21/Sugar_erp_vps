@@ -69,13 +69,13 @@ describe('VPS foundation (PostgreSQL integration)', () => {
       await prisma.user.delete({ where: { id: managedUserId } });
     }
     if (managedRoleId) await prisma.role.delete({ where: { id: managedRoleId } });
-    if (deviceId) await prisma.device.delete({ where: { id: deviceId } });
+    if (deviceId) await prisma.device.deleteMany({ where: { id: deviceId } });
     if (itemId) {
       await prisma.retailPriceRevision.deleteMany({ where: { itemId } });
       await prisma.item.delete({ where: { id: itemId } });
     }
-    if (siteId) await prisma.site.delete({ where: { id: siteId } });
-    if (cafeSiteId) await prisma.site.delete({ where: { id: cafeSiteId } });
+    if (siteId) { await prisma.syncEvent.deleteMany({ where: { siteId } }); await prisma.device.deleteMany({ where: { siteId } }); await prisma.site.delete({ where: { id: siteId } }); }
+    if (cafeSiteId) { await prisma.syncEvent.deleteMany({ where: { siteId: cafeSiteId } }); await prisma.device.deleteMany({ where: { siteId: cafeSiteId } }); await prisma.site.delete({ where: { id: cafeSiteId } }); }
     if (userId) {
       await prisma.userSiteRole.deleteMany({ where: { userId } });
       await prisma.user.delete({ where: { id: userId } });

@@ -5,16 +5,40 @@ import { DecideConflictDto } from './decide-conflict.dto';
 import { CreateCafeCustomerDto } from './create-cafe-customer.dto';
 import { SetCafePriceDto } from './set-cafe-price.dto';
 import { UpdateCafeCustomerDto } from './update-cafe-customer.dto';
+import { SaveRecipeDto } from './save-recipe.dto';
 
 @Injectable()
 export class AdminService {
   constructor(private readonly prisma: PrismaService) {}
 
+  async recipes() { const rows = await this.prisma.recipe.findMany({ include: { product: true, components: { include: { ingredient: true } } }, orderBy: { product: { nameAr: 'asc' } } }); return rows.map((row) => ({ ...row, outputScaled: row.outputScaled.toString(), components: row.components.map((component) => ({ ...component, quantityScaled: component.quantityScaled.toString() })) })); }
+
+  async saveRecipe(productId: string, input: SaveRecipeDto) {
+    if (new Set(input.components.map((x) => x.ingredientItemId)).size !== input.components.length)
+      throw new HttpException({ code: 'DUPLICATE_INGREDIENT', message: 'Recipe repeats an ingredient' }, 422);
+    await this.prisma.$transaction(async (tx) => {
+      const product = await tx.item.findFirst({ where: { id: productId, kind: 'PRODUCT', active: true } });
+      const ingredients = await tx.item.findMany({ where: { id: { in: input.components.map((x) => x.ingredientItemId) }, kind: 'INGREDIENT', active: true } });
+      if (!product || ingredients.length !== input.components.length) throw new HttpException({ code: 'INVALID_RECIPE_ITEMS', message: 'Recipe requires one active product and active ingredients' }, 422);
+      const existing = await tx.recipe.findUnique({ where: { productItemId: productId } });
+      if ((existing?.version ?? 0) !== input.expectedVersion) throw new HttpException({ code: 'STALE_VERSION', message: 'Recipe was updated; reload and retry', retryable: false }, 409);
+      if (existing) {
+        await tx.recipeComponent.deleteMany({ where: { recipeId: existing.id } });
+        await tx.recipe.update({ where: { id: existing.id }, data: { outputScaled: BigInt(input.outputScaled), version: { increment: 1 }, active: true,
+          components: { create: input.components.map((x) => ({ ingredientItemId: x.ingredientItemId, quantityScaled: BigInt(x.quantityScaled) })) } }, include: { components: true } });
+        return;
+      }
+      await tx.recipe.create({ data: { productItemId: productId, outputScaled: BigInt(input.outputScaled), components: { create: input.components.map((x) => ({ ingredientItemId: x.ingredientItemId, quantityScaled: BigInt(x.quantityScaled) })) } } });
+    });
+    const saved = await this.prisma.recipe.findUniqueOrThrow({ where: { productItemId: productId }, include: { product: true, components: { include: { ingredient: true } } } });
+    return { ...saved, outputScaled: saved.outputScaled.toString(), components: saved.components.map((component) => ({ ...component, quantityScaled: component.quantityScaled.toString() })) };
+  }
+
   async siteOverview(siteId: string) {
     const site = await this.prisma.site.findUnique({ where: { id: siteId } });
     if (!site) throw new NotFoundException('Site not found');
     const { dayStart, nextDay, monthStart, nextMonth } = cairoBoundaries();
-    const [stock, today, month, recentSales, pendingAdjustments] = await Promise.all([
+    const [stock, today, month, todayCorrections, monthCorrections, recentSales, pendingAdjustments, inventoryHistory] = await Promise.all([
       this.prisma.stockBalance.findMany({
         where: { siteId },
         include: { item: true },
@@ -30,12 +54,21 @@ export class AdminService {
         _sum: { netMinor: true, tipMinor: true },
         _count: { _all: true },
       }),
+      this.prisma.saleCorrection.aggregate({
+        where: { originalSale: { siteId }, occurredAt: { gte: dayStart, lt: nextDay } }, _sum: { refundMinor: true },
+      }),
+      this.prisma.saleCorrection.aggregate({
+        where: { originalSale: { siteId }, occurredAt: { gte: monthStart, lt: nextMonth } }, _sum: { refundMinor: true },
+      }),
       this.prisma.retailSale.findMany({
         where: { siteId, businessDate: { gte: dayStart, lt: nextDay } },
+        include: { corrections: { select: { refundMinor: true } } },
         orderBy: { occurredAt: 'desc' },
         take: 10,
       }),
       this.prisma.stockAdjustment.count({ where: { siteId, status: 'PENDING_SITE_APPLY' } }),
+      this.prisma.inventoryTransaction.findMany({ where: { siteId }, include: { lines: { include: { item: true } }, user: { select: { displayName: true } } },
+        orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }], take: 100 }),
     ]);
 
     const newest = stock.reduce<Date | null>(
@@ -44,6 +77,15 @@ export class AdminService {
     );
     return {
       site,
+      inventory_history: inventoryHistory.map((movement) => ({
+        id: movement.id, reference_id: movement.referenceId, kind: movement.kind, reason: movement.reason,
+        user_name: movement.user.displayName, occurred_at: movement.occurredAt.toISOString(),
+        lines: movement.lines.map((line) => {
+          const item = line.item;
+          return { item_id: line.itemId, name_ar: item?.nameAr ?? line.itemId, unit: item?.unit ?? '',
+            quantity_scale: item?.quantityScale ?? 1, location: line.location, delta_scaled: line.deltaScaled.toString() };
+        }),
+      })),
       freshness: { as_of: newest?.toISOString() ?? null, stale: newest ? Date.now() - newest.getTime() > 15 * 60_000 : true },
       stock: stock.map((row) => ({
         id: row.id,
@@ -62,12 +104,12 @@ export class AdminService {
       sales: {
         currency: 'EGP',
         today: {
-          net_minor: (today._sum.netMinor ?? 0n).toString(),
+          net_minor: ((today._sum.netMinor ?? 0n) - (todayCorrections._sum.refundMinor ?? 0n)).toString(),
           tips_minor: (today._sum.tipMinor ?? 0n).toString(),
           receipt_count: today._count._all,
         },
         month: {
-          net_minor: (month._sum.netMinor ?? 0n).toString(),
+          net_minor: ((month._sum.netMinor ?? 0n) - (monthCorrections._sum.refundMinor ?? 0n)).toString(),
           tips_minor: (month._sum.tipMinor ?? 0n).toString(),
           receipt_count: month._count._all,
         },
@@ -75,7 +117,7 @@ export class AdminService {
           id: sale.id,
           receipt_number: sale.receiptNumber,
           shift_kind: sale.shiftKind,
-          net_minor: sale.netMinor.toString(),
+          net_minor: (sale.netMinor - sale.corrections.reduce((sum, correction) => sum + correction.refundMinor, 0n)).toString(),
           tip_minor: sale.tipMinor.toString(),
           occurred_at: sale.occurredAt.toISOString(),
         })),
@@ -202,7 +244,7 @@ export class AdminService {
             business_date: invoice.businessDate.toISOString().slice(0, 10),
             net_minor: invoice.netMinor.toString(),
             paid_minor: allocated.toString(),
-            outstanding_minor: (invoice.netMinor - allocated).toString(),
+            outstanding_minor: (invoice.status === 'REVERSED' ? 0n : invoice.netMinor - allocated).toString(),
             status: invoice.status,
             lines: invoice.lines.map((line) => ({
               id: line.id,
@@ -297,7 +339,7 @@ export class AdminService {
   async kitchenOverview() {
     const sites = await this.prisma.site.findMany({ where: { type: 'KITCHEN', active: true } });
     const siteIds = sites.map((site) => site.id);
-    const [stock, variances] = await Promise.all([
+    const [stock, variances, requests, shipments] = await Promise.all([
       this.prisma.stockBalance.findMany({
         where: { siteId: { in: siteIds }, item: { kind: 'INGREDIENT' } },
         include: { site: { select: { id: true, name: true } }, item: true },
@@ -308,6 +350,14 @@ export class AdminService {
         include: { site: { select: { id: true, name: true } }, item: true },
         orderBy: { businessDate: 'desc' },
         take: 100,
+      }),
+      this.prisma.kitchenRequest.findMany({
+        include: { requestingSite: { select: { id: true, name: true } }, lines: true },
+        orderBy: { submittedAt: 'desc' }, take: 100,
+      }),
+      this.prisma.kitchenShipment.findMany({
+        include: { destinationSite: { select: { id: true, name: true } }, lines: true, receipt: true },
+        orderBy: { dispatchedAt: 'desc' }, take: 100,
       }),
     ]);
     return {
@@ -336,6 +386,15 @@ export class AdminService {
         recorded_waste_scaled: row.recordedWasteScaled.toString(),
         unexplained_variance_scaled: row.unexplainedVarianceScaled.toString(),
         cost_minor_per_scale: row.costMinorPerScale?.toString() ?? null,
+      })),
+      requests: requests.map((row) => ({
+        id: row.id, branch: row.requestingSite, status: row.status,
+        submitted_at: row.submittedAt.toISOString(), line_count: row.lines.length,
+      })),
+      shipments: shipments.map((row) => ({
+        id: row.id, reference: row.reference, branch: row.destinationSite, status: row.status,
+        dispatched_at: row.dispatchedAt.toISOString(), line_count: row.lines.length,
+        receipt_status: row.receipt?.status ?? null,
       })),
     };
   }

@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ApplicationIcon>Assets\sugar.ico</ApplicationIcon>
+    <AvaloniaUseCompiledBindingsByDefault>false</AvaloniaUseCompiledBindingsByDefault>
+    <AvaloniaNameGeneratorIsEnabled>false</AvaloniaNameGeneratorIsEnabled>
+  </PropertyGroup>
+  <ItemGroup>
+    <AvaloniaResource Include="Assets\**" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\SugarERP.Application\SugarERP.Application.csproj" />
+    <ProjectReference Include="..\..\src\SugarERP.Desktop.Shared\SugarERP.Desktop.Shared.csproj" />
+    <ProjectReference Include="..\..\src\SugarERP.Domain\SugarERP.Domain.csproj" />
+    <ProjectReference Include="..\..\src\SugarERP.Infrastructure.Local\SugarERP.Infrastructure.Local.csproj" />
+    <ProjectReference Include="..\..\src\SugarERP.Sync.Client\SugarERP.Sync.Client.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Avalonia" ExcludeAssets="analyzers" />
+    <PackageReference Include="Avalonia.Desktop" />
+    <PackageReference Include="Avalonia.Fonts.Inter" />
+    <PackageReference Include="Avalonia.Themes.Fluent" />
+    <PackageReference Include="CommunityToolkit.Mvvm" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+  <Target Name="RemoveIncompatibleAvaloniaAnalyzers" BeforeTargets="CoreCompile">
+    <ItemGroup>
+      <Analyzer Remove="@(Analyzer)" Condition="$([System.String]::Copy('%(Analyzer.FileName)').StartsWith('Avalonia.'))" />
+    </ItemGroup>
+  </Target>
+</Project>

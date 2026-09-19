@@ -16,5 +16,17 @@ docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" build api web migrate
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" run --rm migrate
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --no-build api web
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ps
-curl --fail --silent --show-error --retry 8 --retry-delay 2 http://127.0.0.1:3000/api/v1/ready
-curl --fail --silent --show-error --retry 8 --retry-delay 2 http://127.0.0.1:4173/
+for url in http://127.0.0.1:3000/api/v1/ready http://127.0.0.1:4173/; do
+    ready=0
+    for attempt in $(seq 1 30); do
+        if curl --fail --silent --show-error "$url" >/dev/null 2>&1; then
+            ready=1
+            break
+        fi
+        sleep 2
+    done
+    if [ "$ready" -ne 1 ]; then
+        echo "Service did not become ready: $url" >&2
+        exit 1
+    fi
+done

@@ -7,6 +7,7 @@ import { DecideConflictDto } from './decide-conflict.dto';
 import { CreateCafeCustomerDto } from './create-cafe-customer.dto';
 import { SetCafePriceDto } from './set-cafe-price.dto';
 import { UpdateCafeCustomerDto } from './update-cafe-customer.dto';
+import { SaveRecipeDto } from './save-recipe.dto';
 
 interface AdminRequest extends Request {
   user: { id: string; roles: string[] };
@@ -77,6 +78,14 @@ export class AdminBusinessController {
   @Get('kitchen/overview')
   kitchenOverview() {
     return this.admin.kitchenOverview();
+  }
+
+  @Get('kitchen/recipes')
+  recipes() { return this.admin.recipes(); }
+
+  @Put('kitchen/recipes/:productId')
+  saveRecipe(@Param('productId', ParseUUIDPipe) productId: string, @Body() input: SaveRecipeDto) {
+    return this.admin.saveRecipe(productId, input);
   }
 
   @Get('conflicts')

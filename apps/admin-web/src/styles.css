@@ -40,6 +40,12 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .eyebrow.dark { color: var(--primary); margin-top: 0; }
 .login-brand h1 { margin: 0; font-size: clamp(2.5rem, 5vw, 4.4rem); line-height: 1.22; letter-spacing: -.05em; }
 .login-intro { max-width: 500px; color: #c8cee0; font-size: 1.08rem; line-height: 1.9; }
+.public-installers { margin-top: 28px; display: grid; gap: 12px; max-width: 560px; }
+.public-installers > strong { color: white; font-size: .95rem; }
+.public-installers > div { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+.public-installers a { min-height: 42px; padding: 9px 12px; border: 1px solid rgba(255,255,255,.2); border-radius: 11px; color: white; background: rgba(255,255,255,.08); display: flex; align-items: center; justify-content: center; gap: 7px; text-decoration: none; font-size: .78rem; font-weight: 700; }
+.public-installers a:hover { background: rgba(255,255,255,.15); border-color: rgba(255,255,255,.35); }
+.public-installers small { color: #aeb7cd; }
 .login-status { display: flex; align-items: center; gap: 10px; color: #bfc7dc; font-size: .9rem; }
 .login-panel { display: grid; place-items: center; padding: 34px; }
 .login-card { width: min(440px, 100%); }
@@ -189,8 +195,9 @@ td strong { color: var(--ink); }
 .empty-state strong { color: #5c6479; }
 .empty-state p { margin: 0; max-width: 410px; font-size: .8rem; line-height: 1.65; }
 .installers { overflow: hidden; }
-.installer-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
-.installer-grid article { padding: 17px; border: 1px solid var(--line); border-radius: 15px; }
+.installer-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.installer-grid article { min-width: 0; padding: 17px; border: 1px solid var(--line); border-radius: 15px; }
+.installer-grid article > small { display: block; overflow-wrap: anywhere; margin-top: 10px; font-size: .7rem; }
 .installer-icon { background: #eeecff; color: var(--primary); }
 .installer-grid h3 { margin: 15px 0 4px; font-size: .95rem; }
 .installer-grid p { margin: 0; color: var(--muted); font-size: .75rem; }

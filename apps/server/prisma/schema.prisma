@@ -90,6 +90,12 @@ model Site {
   collectedCafePayments CafePayment[] @relation("CafePaymentCollectionSite")
   quantityConflicts QuantityConflict[]
   ingredientVariances IngredientVariance[]
+  requestedTransfers KitchenRequest[] @relation("RequestingSite")
+  kitchenTransfers KitchenRequest[] @relation("KitchenSite")
+  sentShipments KitchenShipment[] @relation("ShipmentKitchen")
+  receivedShipments KitchenShipment[] @relation("ShipmentBranch")
+  originatedCafeCustomers CafeCustomer[] @relation("CafeCustomerOrigin")
+  inventoryTransactions InventoryTransaction[]
 
   @@map("sites")
 }
@@ -123,11 +129,13 @@ model User {
   displayName  String         @map("display_name") @db.VarChar(200)
   passwordHash String         @map("password_hash") @db.VarChar(255)
   active       Boolean        @default(true)
+  status       String         @default("ACTIVE") @db.VarChar(30)
   createdAt    DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt    DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
   siteRoles    UserSiteRole[]
   stockAdjustments StockAdjustment[]
   adminDecisions AdminDecision[]
+  inventoryTransactions InventoryTransaction[]
 
   @@map("users")
 }
@@ -176,12 +184,39 @@ model Item {
   stockAdjustments StockAdjustment[]
   conflictLines ConflictLine[]
   ingredientVariances IngredientVariance[]
+  recipe Recipe? @relation("RecipeProduct")
+  recipeComponents RecipeComponent[] @relation("RecipeIngredient")
   retailPriceRevisions RetailPriceRevision[]
   cafePrices CafeItemPrice[]
   cafePriceRevisions CafePriceRevision[]
   cafeInvoiceLines CafeInvoiceLine[]
+  inventoryTransactionLines InventoryTransactionLine[]
 
   @@map("items")
+}
+
+model Recipe {
+  id String @id @default(uuid()) @db.Uuid
+  productItemId String @unique @map("product_item_id") @db.Uuid
+  outputScaled BigInt @map("output_scaled")
+  version Int @default(1)
+  active Boolean @default(true)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  product Item @relation("RecipeProduct", fields: [productItemId], references: [id], onDelete: Restrict)
+  components RecipeComponent[]
+  @@map("recipes")
+}
+
+model RecipeComponent {
+  id String @id @default(uuid()) @db.Uuid
+  recipeId String @map("recipe_id") @db.Uuid
+  ingredientItemId String @map("ingredient_item_id") @db.Uuid
+  quantityScaled BigInt @map("quantity_scaled")
+  recipe Recipe @relation(fields: [recipeId], references: [id], onDelete: Restrict)
+  ingredient Item @relation("RecipeIngredient", fields: [ingredientItemId], references: [id], onDelete: Restrict)
+  @@unique([recipeId, ingredientItemId])
+  @@index([ingredientItemId])
+  @@map("recipe_components")
 }
 
 model RetailPriceRevision {
@@ -255,6 +290,103 @@ model SyncEvent {
   @@map("sync_events")
 }
 
+model KitchenRequest {
+  id String @id @db.Uuid
+  requestingSiteId String @map("requesting_site_id") @db.Uuid
+  kitchenSiteId String @map("kitchen_site_id") @db.Uuid
+  status String @default("REQUESTED") @db.VarChar(30)
+  version Int @default(1)
+  businessDate String? @map("business_date") @db.VarChar(10)
+  submittedAt DateTime @map("submitted_at") @db.Timestamptz(6)
+  sourceEventId String @unique @map("source_event_id") @db.Uuid
+  requestingSite Site @relation("RequestingSite", fields: [requestingSiteId], references: [id], onDelete: Restrict)
+  kitchenSite Site @relation("KitchenSite", fields: [kitchenSiteId], references: [id], onDelete: Restrict)
+  lines KitchenRequestLine[]
+  shipments KitchenShipment[]
+
+  @@index([kitchenSiteId, status, submittedAt])
+  @@index([requestingSiteId, submittedAt])
+  @@map("kitchen_requests")
+}
+
+model KitchenRequestLine {
+  id String @id @db.Uuid
+  requestId String @map("request_id") @db.Uuid
+  itemId String @map("item_id") @db.Uuid
+  requestedScaled BigInt @map("requested_scaled")
+  sentScaled BigInt @default(0) @map("sent_scaled")
+  quantityScale Int @map("quantity_scale")
+  nameSnapshot String @map("name_snapshot") @db.VarChar(300)
+  unitSnapshot String @map("unit_snapshot") @db.VarChar(30)
+  request KitchenRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  shipmentLines KitchenShipmentLine[]
+
+  @@unique([requestId, itemId])
+  @@index([requestId])
+  @@map("kitchen_request_lines")
+}
+
+model KitchenShipment {
+  id String @id @db.Uuid
+  requestId String @map("request_id") @db.Uuid
+  sourceKitchenSiteId String @map("source_kitchen_site_id") @db.Uuid
+  destinationSiteId String @map("destination_site_id") @db.Uuid
+  reference String @db.VarChar(120)
+  status String @default("SENT") @db.VarChar(30)
+  version Int @default(1)
+  dispatchedAt DateTime @map("dispatched_at") @db.Timestamptz(6)
+  sourceEventId String @unique @map("source_event_id") @db.Uuid
+  request KitchenRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  sourceKitchen Site @relation("ShipmentKitchen", fields: [sourceKitchenSiteId], references: [id], onDelete: Restrict)
+  destinationSite Site @relation("ShipmentBranch", fields: [destinationSiteId], references: [id], onDelete: Restrict)
+  lines KitchenShipmentLine[]
+  receipt KitchenIncomingReceipt?
+
+  @@index([destinationSiteId, status, dispatchedAt])
+  @@index([requestId, dispatchedAt])
+  @@map("kitchen_shipments")
+}
+
+model KitchenShipmentLine {
+  id String @id @db.Uuid
+  shipmentId String @map("shipment_id") @db.Uuid
+  requestLineId String @map("request_line_id") @db.Uuid
+  itemId String @map("item_id") @db.Uuid
+  sentScaled BigInt @map("sent_scaled")
+  shipment KitchenShipment @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+  requestLine KitchenRequestLine @relation(fields: [requestLineId], references: [id], onDelete: Restrict)
+  receiptLines KitchenIncomingReceiptLine[]
+
+  @@unique([shipmentId, requestLineId])
+  @@index([shipmentId])
+  @@map("kitchen_shipment_lines")
+}
+
+model KitchenIncomingReceipt {
+  id String @id @db.Uuid
+  shipmentId String @unique @map("shipment_id") @db.Uuid
+  status String @db.VarChar(30)
+  countedAt DateTime @map("counted_at") @db.Timestamptz(6)
+  sourceEventId String @unique @map("source_event_id") @db.Uuid
+  shipment KitchenShipment @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+  lines KitchenIncomingReceiptLine[]
+
+  @@map("kitchen_incoming_receipts")
+}
+
+model KitchenIncomingReceiptLine {
+  id String @id @db.Uuid
+  receiptId String @map("receipt_id") @db.Uuid
+  shipmentLineId String @unique @map("shipment_line_id") @db.Uuid
+  countedScaled BigInt @map("counted_scaled")
+  confirmedScaled BigInt? @map("confirmed_scaled")
+  receipt KitchenIncomingReceipt @relation(fields: [receiptId], references: [id], onDelete: Restrict)
+  shipmentLine KitchenShipmentLine @relation(fields: [shipmentLineId], references: [id], onDelete: Restrict)
+
+  @@index([receiptId])
+  @@map("kitchen_incoming_receipt_lines")
+}
+
 model StockBalance {
   id             String        @id @default(uuid()) @db.Uuid
   siteId         String        @map("site_id") @db.Uuid
@@ -272,6 +404,36 @@ model StockBalance {
   @@map("stock_balances")
 }
 
+model InventoryTransaction {
+  id String @id @db.Uuid
+  siteId String @map("site_id") @db.Uuid
+  userId String @map("user_id") @db.Uuid
+  referenceId String @map("reference_id") @db.Uuid
+  kind String @db.VarChar(40)
+  reason String @db.VarChar(500)
+  occurredAt DateTime @map("occurred_at") @db.Timestamptz(6)
+  sourceEventId String @unique @map("source_event_id") @db.Uuid
+  site Site @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+  lines InventoryTransactionLine[]
+  @@unique([siteId, kind, referenceId])
+  @@index([siteId, occurredAt])
+  @@map("inventory_transactions")
+}
+
+model InventoryTransactionLine {
+  id String @id @default(uuid()) @db.Uuid
+  transactionId String @map("transaction_id") @db.Uuid
+  itemId String @map("item_id") @db.Uuid
+  location StockLocation
+  deltaScaled BigInt @map("delta_scaled")
+  transaction InventoryTransaction @relation(fields: [transactionId], references: [id], onDelete: Restrict)
+  item Item @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  @@unique([transactionId, itemId, location])
+  @@index([itemId, location])
+  @@map("inventory_transaction_lines")
+}
+
 model RetailSale {
   id            String    @id @default(uuid()) @db.Uuid
   siteId        String    @map("site_id") @db.Uuid
@@ -284,10 +446,27 @@ model RetailSale {
   sourceEventId String?   @unique @map("source_event_id") @db.Uuid
   createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   site          Site      @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  corrections   SaleCorrection[]
 
   @@unique([siteId, receiptNumber])
   @@index([siteId, businessDate])
   @@map("retail_sales")
+}
+
+model SaleCorrection {
+  id             String     @id @db.Uuid
+  originalSaleId String     @map("original_sale_id") @db.Uuid
+  refundMinor    BigInt     @map("refund_minor")
+  reason         String     @db.VarChar(500)
+  actor          String     @db.VarChar(200)
+  refundMethod   String     @map("refund_method") @db.VarChar(20)
+  lines          Json
+  occurredAt     DateTime   @map("occurred_at") @db.Timestamptz(6)
+  sourceEventId  String     @unique @map("source_event_id") @db.Uuid
+  originalSale   RetailSale @relation(fields: [originalSaleId], references: [id], onDelete: Restrict)
+
+  @@index([originalSaleId, occurredAt])
+  @@map("sale_corrections")
 }
 
 model StockAdjustment {
@@ -319,12 +498,16 @@ model CafeCustomer {
   active    Boolean       @default(true)
   createdAt DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+  originSiteId String?    @map("origin_site_id") @db.Uuid
+  sourceEventId String?   @unique @map("source_event_id") @db.Uuid
+  originSite Site?        @relation("CafeCustomerOrigin", fields: [originSiteId], references: [id], onDelete: Restrict)
   invoices  CafeInvoice[]
   payments  CafePayment[]
   prices    CafeItemPrice[]
   priceRevisions CafePriceRevision[]
 
   @@map("cafe_customers")
+  @@index([originSiteId])
 }
 
 model CafeItemPrice {

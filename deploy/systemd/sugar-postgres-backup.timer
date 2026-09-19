@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly Sugar ERP PostgreSQL backup
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=120
+Unit=sugar-postgres-backup.service
+
+[Install]
+WantedBy=timers.target

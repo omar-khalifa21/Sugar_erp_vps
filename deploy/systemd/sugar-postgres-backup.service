@@ -1,0 +1,10 @@
+[Unit]
+Description=Sugar ERP PostgreSQL backup with archive verification
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/sugar-erp
+ExecStart=/bin/sh /opt/sugar-erp/deploy/scripts/backup-postgres.sh
+UMask=0077

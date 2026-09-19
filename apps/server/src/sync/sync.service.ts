@@ -5,6 +5,7 @@ import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { DeviceAuthService } from './device-auth.service';
 import { SyncEventDto, SyncPushDto } from './sync.dto';
+import { TransferProjectionService } from './transfer-projection.service';
 
 @Injectable()
 export class SyncService {
@@ -14,12 +15,28 @@ export class SyncService {
     private readonly prisma: PrismaService,
     private readonly deviceAuth: DeviceAuthService,
     config: ConfigService,
+    private readonly transfers: TransferProjectionService,
   ) {
     this.cursorKey = config.getOrThrow<string>('JWT_SECRET');
   }
 
-  async push(deviceId: string | undefined, credential: string | undefined, input: SyncPushDto) {
-    const device = await this.deviceAuth.authenticate(deviceId, credential);
+  async bootstrap(deviceId: string | undefined, credential: string | undefined, appVersion?: string) {
+    const device = await this.deviceAuth.authenticate(deviceId, credential, appVersion);
+    const [site, catalog, customers, recipes, stock] = await Promise.all([
+      this.prisma.site.findUniqueOrThrow({ where: { id: device.siteId }, select: { id: true, name: true, type: true, timezone: true } }),
+      this.prisma.item.findMany({ where: { active: true }, orderBy: { nameAr: 'asc' } }),
+      this.prisma.cafeCustomer.findMany({ where: { active: true }, include: { prices: true }, orderBy: { name: 'asc' } }),
+      device.profile === 'KITCHEN' ? this.prisma.recipe.findMany({ where: { active: true }, include: { components: true }, orderBy: { productItemId: 'asc' } }) : Promise.resolve([]),
+      this.prisma.stockBalance.findMany({ where: { siteId: device.siteId }, select: { itemId: true, location: true, quantityScaled: true, version: true, asOfAt: true } }),
+    ]);
+    return { contract_version: '1.0', site, catalog, customers, recipes: recipes.map((recipe) => ({ id: recipe.id, product_item_id: recipe.productItemId,
+      output_scaled: recipe.outputScaled.toString(), version: recipe.version, components: recipe.components.map((component) => ({
+        ingredient_item_id: component.ingredientItemId, quantity_scaled: component.quantityScaled.toString(),
+      })) })), stock: stock.map((row) => ({ ...row, quantityScaled: row.quantityScaled.toString() })), as_of: new Date().toISOString() };
+  }
+
+  async push(deviceId: string | undefined, credential: string | undefined, input: SyncPushDto, appVersion?: string) {
+    const device = await this.deviceAuth.authenticate(deviceId, credential, appVersion);
     if (input.stream_epoch !== device.streamEpoch) {
       throw contractError(409, 'STREAM_EPOCH_MISMATCH', 'Device stream epoch is stale', false, {
         current_version: device.streamEpoch,
@@ -100,6 +117,7 @@ export class SyncService {
               contentHash: event.content_hash,
             },
           });
+          await this.transfers.apply(transaction, event, device.siteId, device.profile);
           accepted.push({ id: event.id, status: 'accepted', server_position: saved.serverPosition.toString() });
           acceptedInBatch.add(event.id);
           expected += 1;
@@ -124,15 +142,27 @@ export class SyncService {
     credential: string | undefined,
     cursor: string | undefined,
     requestedLimit: number | undefined,
+    appVersion?: string,
   ) {
-    const device = await this.deviceAuth.authenticate(deviceId, credential);
+    const device = await this.deviceAuth.authenticate(deviceId, credential, appVersion);
     const after = cursor ? this.decodeCursor(cursor, device.id) : 0n;
     const limit = requestedLimit ?? 100;
-    const routes: Prisma.SyncEventWhereInput[] = [{ siteId: device.siteId }];
+    // A device already committed its own outbox locally before upload. Echoing those
+    // events back can only duplicate work and can block older clients before they
+    // reach changes published by another device or by the server.
+    const routes: Prisma.SyncEventWhereInput[] = [{ siteId: device.siteId, deviceId: { not: device.id } }];
     if (device.profile === DeviceProfile.KITCHEN) {
       // Requests are owned by branch writers, but must reach the kitchen feed.
       routes.push({
         eventType: 'kitchen_request.submitted',
+        site: { type: { in: [SiteType.BRANCH_TYPE_1, SiteType.BRANCH_TYPE_2] } },
+      });
+      routes.push({
+        eventType: { in: ['incoming_receipt.accepted', 'incoming_receipt.disputed'] },
+        site: { type: { in: [SiteType.BRANCH_TYPE_1, SiteType.BRANCH_TYPE_2] } },
+      });
+      routes.push({
+        eventType: 'kitchen_return.dispatched',
         site: { type: { in: [SiteType.BRANCH_TYPE_1, SiteType.BRANCH_TYPE_2] } },
       });
     } else {
@@ -176,24 +206,43 @@ export class SyncService {
   }
 
   async listKitchenRequests() {
-    const events = await this.prisma.syncEvent.findMany({
-      where: { eventType: 'kitchen_request.submitted', site: { type: { in: [SiteType.BRANCH_TYPE_1, SiteType.BRANCH_TYPE_2] } } },
-      include: { site: { select: { id: true, name: true, type: true } } },
-      orderBy: { serverPosition: 'desc' },
-      take: 200,
+    const requests = await this.prisma.kitchenRequest.findMany({
+      include: { requestingSite: { select: { id: true, name: true, type: true } }, lines: true, shipments: { select: { id: true, status: true } } },
+      orderBy: { submittedAt: 'desc' }, take: 200,
     });
-    const latest = new Map<string, (typeof events)[number]>();
-    for (const event of events) {
-      const payload = event.payload as Record<string, unknown>;
-      const requestId = typeof payload.request_id === 'string' ? payload.request_id : event.id;
-      if (!latest.has(requestId)) latest.set(requestId, event);
-    }
-    return [...latest.values()].map((event) => ({
-      event_id: event.id,
-      source_site: event.site,
-      received_at: event.receivedAt.toISOString(),
-      as_of: event.receivedAt.toISOString(),
-      request: event.payload,
+    return requests.map((request) => ({
+      event_id: request.sourceEventId,
+      source_site: request.requestingSite,
+      received_at: request.submittedAt.toISOString(),
+      as_of: request.submittedAt.toISOString(),
+      request: {
+        request_id: request.id, requesting_site_id: request.requestingSiteId,
+        status: request.status, version: request.version, business_date: request.businessDate,
+        lines: request.lines.map((line) => ({
+          line_id: line.id, item_id: line.itemId, requested_scaled: line.requestedScaled.toString(),
+          sent_scaled: line.sentScaled.toString(), quantity_scale: line.quantityScale,
+          name_snapshot: line.nameSnapshot, unit_snapshot: line.unitSnapshot,
+        })),
+        shipments: request.shipments,
+      },
+    }));
+  }
+
+  async listShipments() {
+    const shipments = await this.prisma.kitchenShipment.findMany({
+      include: { destinationSite: { select: { id: true, name: true, type: true } }, lines: true, receipt: { include: { lines: true } } },
+      orderBy: { dispatchedAt: 'desc' }, take: 200,
+    });
+    return shipments.map((shipment) => ({
+      id: shipment.id, request_id: shipment.requestId, reference: shipment.reference,
+      destination_site: shipment.destinationSite, status: shipment.status,
+      dispatched_at: shipment.dispatchedAt.toISOString(),
+      lines: shipment.lines.map((line) => ({ id: line.id, item_id: line.itemId, sent_scaled: line.sentScaled.toString() })),
+      receipt: shipment.receipt && {
+        id: shipment.receipt.id, status: shipment.receipt.status,
+        counted_at: shipment.receipt.countedAt.toISOString(),
+        lines: shipment.receipt.lines.map((line) => ({ shipment_line_id: line.shipmentLineId, counted_scaled: line.countedScaled.toString() })),
+      },
     }));
   }
 
@@ -223,8 +272,8 @@ export class SyncService {
     }));
   }
 
-  async acknowledge(deviceId: string | undefined, credential: string | undefined, cursor: string) {
-    const device = await this.deviceAuth.authenticate(deviceId, credential);
+  async acknowledge(deviceId: string | undefined, credential: string | undefined, cursor: string, appVersion?: string) {
+    const device = await this.deviceAuth.authenticate(deviceId, credential, appVersion);
     const position = this.decodeCursor(cursor, device.id);
     await this.prisma.$transaction(async (transaction) => {
       await transaction.$queryRaw(

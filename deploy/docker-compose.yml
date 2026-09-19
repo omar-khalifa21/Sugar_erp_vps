@@ -44,6 +44,9 @@ services:
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in the server-only environment}
       JWT_EXPIRES_IN: 15m
       PORT: 3000
+      RELEASES_DIR: /var/lib/sugar-erp/releases
+    volumes:
+      - ${RELEASES_HOST_DIR:?Set RELEASES_HOST_DIR to an absolute host directory}:/var/lib/sugar-erp/releases:ro
     ports:
       - "127.0.0.1:3000:3000"
     depends_on:

@@ -10,6 +10,7 @@ const safeUserSelect = {
   username: true,
   displayName: true,
   active: true,
+  status: true,
   createdAt: true,
   updatedAt: true,
   siteRoles: { include: { role: true, site: true } },
@@ -34,6 +35,7 @@ export class UsersService {
         siteRoles: {
           create: { roleId: input.roleId, ...(input.siteId ? { siteId: input.siteId } : {}) },
         },
+        status: 'ACTIVE',
       },
       select: safeUserSelect,
     });
@@ -48,7 +50,7 @@ export class UsersService {
           ...(input.username !== undefined ? { username: input.username.trim().toLowerCase() } : {}),
           ...(input.displayName !== undefined ? { displayName: input.displayName.trim() } : {}),
           ...(passwordHash ? { passwordHash } : {}),
-          ...(input.active !== undefined ? { active: input.active } : {}),
+          ...(input.active !== undefined ? { active: input.active, status: input.active ? 'ACTIVE' : 'DISABLED' } : {}),
         },
       });
       if (input.roleId) {
@@ -56,12 +58,15 @@ export class UsersService {
         await transaction.userSiteRole.create({
           data: { userId: id, roleId: input.roleId, ...(input.siteId ? { siteId: input.siteId } : {}) },
         });
+        if (input.active !== false) {
+          await transaction.user.update({ where: { id }, data: { status: 'ACTIVE', active: true } });
+        }
       }
       return transaction.user.findUniqueOrThrow({ where: { id }, select: safeUserSelect });
     });
   }
 
   archive(id: string): Promise<SafeUser> {
-    return this.prisma.user.update({ where: { id }, data: { active: false }, select: safeUserSelect });
+    return this.prisma.user.update({ where: { id }, data: { active: false, status: 'DISABLED' }, select: safeUserSelect });
   }
 }

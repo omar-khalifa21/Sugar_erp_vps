@@ -33,6 +33,7 @@ import {
   type Device,
   type Item,
   type KitchenOverview,
+  type KitchenRecipe,
   type QuantityConflict,
   type Role,
   type Site,
@@ -114,24 +115,34 @@ const permissionLabel = (code: string) => permissionOptions.find((permission) =>
 
 function App() {
   const [token, setToken] = useState(() => sessionStorage.getItem('sugar_admin_token'));
+  const [status, setStatus] = useState(() => sessionStorage.getItem('sugar_admin_status'));
 
-  const signIn = (nextToken: string) => {
+  const signIn = (nextToken: string, nextStatus: string) => {
     sessionStorage.setItem('sugar_admin_token', nextToken);
+    sessionStorage.setItem('sugar_admin_status', nextStatus);
     setToken(nextToken);
+    setStatus(nextStatus);
   };
 
   const signOut = () => {
     sessionStorage.removeItem('sugar_admin_token');
+    sessionStorage.removeItem('sugar_admin_status');
     setToken(null);
+    setStatus(null);
   };
 
-  return token ? <AdminApp token={token} onSignOut={signOut} /> : <LoginScreen onSignIn={signIn} />;
+  return token && status === 'PENDING_PERMISSION'
+    ? <main className="login-shell"><section className="login-panel"><div className="login-card"><h2>بانتظار الصلاحيات</h2><p>تم إنشاء حسابك. يستطيع المسؤول منحك الصلاحيات؛ سجّل الدخول مجدداً بعد الموافقة.</p><button className="primary-button" onClick={signOut}>العودة لتسجيل الدخول</button></div></section></main>
+    : token ? <AdminApp token={token} onSignOut={signOut} /> : <LoginScreen onSignIn={signIn} />;
 }
 
-function LoginScreen({ onSignIn }: { onSignIn: (token: string) => void }) {
-  const [username, setUsername] = useState('admin');
+function LoginScreen({ onSignIn }: { onSignIn: (token: string, status: string) => void }) {
+  const [username, setUsername] = useState('');
+  const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [signingUp, setSigningUp] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const submit = async (event: FormEvent) => {
@@ -139,8 +150,15 @@ function LoginScreen({ onSignIn }: { onSignIn: (token: string) => void }) {
     setBusy(true);
     setError('');
     try {
-      const result = await api.login(username, password);
-      onSignIn(result.access_token);
+      if (signingUp) {
+        await api.signup({ username, displayName, password });
+        setNotice('تم إنشاء الحساب. سجّل الدخول وانتظر موافقة المسؤول.');
+        setSigningUp(false);
+        setPassword('');
+      } else {
+        const result = await api.login(username, password);
+        onSignIn(result.access_token, result.status);
+      }
     } catch (caught) {
       setError(caught instanceof ApiError && caught.status === 401 ? 'اسم المستخدم أو كلمة المرور غير صحيحة.' : friendlyError(caught));
     } finally {
@@ -156,27 +174,40 @@ function LoginScreen({ onSignIn }: { onSignIn: (token: string) => void }) {
           <p className="eyebrow">SUGAR ERP</p>
           <h1>كل عملياتك.<br />في مكان واحد.</h1>
           <p className="login-intro">إدارة مركزية للفروع والمطبخ والمخزون، مع سجل محفوظ ومزامنة واضحة.</p>
+          <div className="public-installers" aria-label="تنزيل تطبيقات Sugar ERP">
+            <strong>تنزيل تطبيق Windows الصحيح</strong>
+            <div>
+              <a href="/api/v1/releases/branch-type-1/current/download"><Download size={16} /> فرع نوع ١ · مكتبي</a>
+              <a href="/api/v1/releases/branch-type-1/touch/current/download"><Download size={16} /> فرع نوع ١ · لمس</a>
+              <a href="/api/v1/releases/branch-type-2/current/download"><Download size={16} /> فرع نوع ٢</a>
+              <a href="/api/v1/releases/kitchen/current/download"><Download size={16} /> المطبخ</a>
+            </div>
+            <small>الإصدار الحالي 1.0.0 · Windows x64</small>
+          </div>
         </div>
-        <div className="login-status"><ShieldCheck size={20} /> اتصال محلي مشفّر داخل بيئة التطوير</div>
+        <div className="login-status"><ShieldCheck size={20} /> اتصال HTTPS مشفّر بخادم Sugar ERP</div>
       </section>
       <section className="login-panel">
         <form className="login-card" onSubmit={submit}>
           <div className="mobile-brand"><div className="brand-mark">S</div><strong>Sugar ERP</strong></div>
           <p className="eyebrow dark">لوحة الإدارة</p>
-          <h2>تسجيل الدخول</h2>
-          <p className="muted">استخدم حسابك الإداري للوصول إلى بيانات الشركة.</p>
+          <h2>{signingUp ? 'إنشاء حساب' : 'تسجيل الدخول'}</h2>
+          <p className="muted">{signingUp ? 'يبدأ الحساب بلا صلاحيات حتى يوافق المسؤول.' : 'استخدم حسابك للوصول إلى بيانات الشركة.'}</p>
+          {signingUp && <label>الاسم<input value={displayName} onChange={(event) => setDisplayName(event.target.value)} required /></label>}
           <label>
             اسم المستخدم
             <input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" required />
           </label>
           <label>
             كلمة المرور
-            <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" required />
+            <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={signingUp ? 'new-password' : 'current-password'} minLength={signingUp ? 12 : 8} required />
           </label>
           {error && <div className="form-error" role="alert"><AlertTriangle size={18} /> {error}</div>}
+          {notice && <div role="status">{notice}</div>}
           <button className="primary-button login-button" disabled={busy}>
-            {busy ? <><RefreshCw className="spin" size={19} /> جارٍ الدخول</> : <>دخول آمن <ChevronLeft size={19} /></>}
+            {busy ? <><RefreshCw className="spin" size={19} /> جارٍ التنفيذ</> : <>{signingUp ? 'إنشاء حساب' : 'دخول آمن'} <ChevronLeft size={19} /></>}
           </button>
+          <button type="button" className="secondary-button" onClick={() => { setSigningUp(!signingUp); setError(''); setNotice(''); setPassword(''); }}>{signingUp ? 'لديك حساب؟ سجّل الدخول' : 'ليس لديك حساب؟ أنشئ حساباً'}</button>
           {import.meta.env.DEV && (
             <div className="demo-note">
               <strong>بيانات العرض المحلي</strong>
@@ -261,9 +292,9 @@ function AdminApp({ token, onSignOut }: { token: string; onSignOut: () => void }
     setToast('تمت أرشفة الموقع مع الاحتفاظ بسجله');
   };
 
-  const createItem = async (input: Pick<Item, 'sku' | 'nameAr' | 'unit' | 'quantityScale' | 'retailPriceMinor' | 'kind'>) => {
+  const createItem = async (input: Pick<Item, 'nameAr' | 'unit' | 'quantityScale' | 'retailPriceMinor' | 'kind'>) => {
     const item = await api.createItem(token, input);
-    setData((current) => ({ ...current, items: [...current.items, item].sort((a, b) => a.sku.localeCompare(b.sku)) }));
+    setData((current) => ({ ...current, items: [...current.items, item].sort((a, b) => a.nameAr.localeCompare(b.nameAr, 'ar')) }));
     setToast('تمت إضافة الصنف بنجاح');
   };
 
@@ -417,6 +448,7 @@ function AdminApp({ token, onSignOut }: { token: string; onSignOut: () => void }
               onNavigate={navigate}
               selectedSiteId={selectedSiteId}
               onSelectSite={setSelectedSiteId}
+              token={token}
             />
           )}
         </main>
@@ -425,14 +457,15 @@ function AdminApp({ token, onSignOut }: { token: string; onSignOut: () => void }
   );
 }
 
-function PageContent({ page, data, lastLoaded, onCreateSite, onUpdateSite, onArchiveSite, onCreateItem, onUpdateItem, onArchiveItem, onCreateUser, onUpdateUser, onArchiveUser, onCreateRole, onUpdateRole, onArchiveRole, onIssueEnrollmentToken, onLoadBranchOverview, onRequestStockAdjustment, onLoadCafeOverview, onCreateCafeCustomer, onUpdateCafeCustomer, onArchiveCafeCustomer, onSetCafePrice, onLoadKitchenOverview, onLoadConflicts, onDecideConflict, onNavigate, selectedSiteId, onSelectSite }: {
+function PageContent({ page, data, lastLoaded, onCreateSite, onUpdateSite, onArchiveSite, onCreateItem, onUpdateItem, onArchiveItem, onCreateUser, onUpdateUser, onArchiveUser, onCreateRole, onUpdateRole, onArchiveRole, onIssueEnrollmentToken, onLoadBranchOverview, onRequestStockAdjustment, onLoadCafeOverview, onCreateCafeCustomer, onUpdateCafeCustomer, onArchiveCafeCustomer, onSetCafePrice, onLoadKitchenOverview, onLoadConflicts, onDecideConflict, onNavigate, selectedSiteId, onSelectSite, token }: {
+  token: string;
   page: PageKey;
   data: AdminData;
   lastLoaded: Date | null;
   onCreateSite: (input: Pick<Site, 'code' | 'name' | 'type'>) => Promise<void>;
   onUpdateSite: (id: string, input: Partial<Pick<Site, 'code' | 'name' | 'type' | 'active'>>) => Promise<void>;
   onArchiveSite: (id: string) => Promise<void>;
-  onCreateItem: (input: Pick<Item, 'sku' | 'nameAr' | 'unit' | 'quantityScale' | 'retailPriceMinor' | 'kind'>) => Promise<void>;
+  onCreateItem: (input: Pick<Item, 'nameAr' | 'unit' | 'quantityScale' | 'retailPriceMinor' | 'kind'>) => Promise<void>;
   onUpdateItem: (id: string, input: Partial<Pick<Item, 'sku' | 'nameAr' | 'unit' | 'quantityScale' | 'retailPriceMinor' | 'kind' | 'active'>>) => Promise<void>;
   onArchiveItem: (id: string) => Promise<void>;
   onCreateUser: (input: { username: string; displayName: string; password: string; roleId: string; siteId?: string }) => Promise<void>;
@@ -460,11 +493,11 @@ function PageContent({ page, data, lastLoaded, onCreateSite, onUpdateSite, onArc
     case 'dashboard': return <Dashboard data={data} lastLoaded={lastLoaded} onNavigate={onNavigate} />;
     case 'branches': return <BranchesPage data={data} selectedSiteId={selectedSiteId} onSelectSite={onSelectSite} onCreate={onCreateSite} onUpdate={onUpdateSite} onArchive={onArchiveSite} onLoadOverview={onLoadBranchOverview} onRequestAdjustment={onRequestStockAdjustment} />;
     case 'cafe': return <CafePage items={data.items} onLoad={onLoadCafeOverview} onCreate={onCreateCafeCustomer} onUpdate={onUpdateCafeCustomer} onArchive={onArchiveCafeCustomer} onSetPrice={onSetCafePrice} />;
-    case 'kitchen': return <KitchenPage data={data} onLoad={onLoadKitchenOverview} />;
+    case 'kitchen': return <KitchenPage data={data} onLoad={onLoadKitchenOverview} token={token} />;
     case 'conflicts': return <ConflictsPage onLoad={onLoadConflicts} onDecide={onDecideConflict} />;
     case 'catalog': return <CatalogPage items={data.items} onCreate={onCreateItem} onUpdate={onUpdateItem} onArchive={onArchiveItem} />;
     case 'team': return <TeamPage users={data.users} roles={data.roles} sites={data.sites} onCreateUser={onCreateUser} onUpdateUser={onUpdateUser} onArchiveUser={onArchiveUser} onCreateRole={onCreateRole} onUpdateRole={onUpdateRole} onArchiveRole={onArchiveRole} />;
-    case 'operations': return <OperationsPage data={data} onIssueEnrollmentToken={onIssueEnrollmentToken} />;
+    case 'operations': return <OperationsPage data={data} onIssueEnrollmentToken={onIssueEnrollmentToken} token={token} />;
   }
 }
 
@@ -564,7 +597,8 @@ function BranchDetail({ site, data, onBack, onUpdate, onArchive, onLoadOverview,
       <section className="simple-stats branch-stats"><div><span>مبيعات اليوم</span><strong>{formatMoney(overview.sales.today.net_minor)}</strong><small>{overview.sales.today.receipt_count} إيصالات · EGP</small></div><div><span>إيراد الشهر</span><strong>{formatMoney(overview.sales.month.net_minor)}</strong><small>{overview.sales.month.receipt_count} إيصالات · EGP</small></div><div><span>الأجهزة</span><strong>{devices.length}</strong><small>{devices.filter((device) => device.enrollmentStatus === 'ENROLLED').length} متصل</small></div></section>
       <section className={`freshness-note ${overview.freshness.stale ? 'stale' : ''}`}><span className="live-dot" /><span>{overview.freshness.as_of ? `المخزون حتى ${formatDate(overview.freshness.as_of)}` : 'لم يصل رصيد مخزون بعد'}</span>{overview.pending_adjustments > 0 && <span className="pill warning">{overview.pending_adjustments} تعديل بانتظار التطبيق</span>}</section>
       {adjusting && <form className="panel adjustment-form" onSubmit={submitAdjustment}><div><strong>طلب تعديل: {adjusting.name_ar}</strong><small>لن تتغير الكمية حتى يطبّق جهاز الفرع الطلب ويسجله.</small></div><label>فرق الكمية<input type="number" step={1 / adjusting.quantity_scale} value={adjustment.delta} onChange={(event) => setAdjustment({ ...adjustment, delta: event.target.value })} placeholder="مثال: -2 أو 3" required /></label><label>سبب التعديل<input value={adjustment.reason} onChange={(event) => setAdjustment({ ...adjustment, reason: event.target.value })} minLength={3} required /></label><button className="primary-button">إرسال الطلب</button><button type="button" className="secondary-button" onClick={() => setAdjusting(null)}>إلغاء</button></form>}
-      <section className="panel table-panel"><PanelHeading title="المخزون الحالي" subtitle="الكميات والأسعار حسب الصنف والموقع؛ التعديل يتم كطلب موثق" /><div className="table-wrap"><table><thead><tr><th>الصنف</th><th>سعر البيع</th><th>التصنيف</th><th>الموقع</th><th>الكمية</th><th>آخر مزامنة</th><th>إجراء</th></tr></thead><tbody>{overview.stock.map((row) => <tr key={row.id}><td><strong>{row.name_ar}</strong><small className="cell-note ltr">{row.sku}</small></td><td><strong className="price-value">{formatMoney(String(row.retail_price_minor))} EGP</strong></td><td>{row.kind === 'PRODUCT' ? 'منتج' : 'خامة'}</td><td>{locationLabel(row.location)}</td><td><strong>{formatQuantity(row.quantity_scaled, row.quantity_scale)} {row.unit}</strong></td><td>{formatDate(row.as_of)}</td><td><div className="row-actions"><button onClick={() => { setAdjusting(row); setAdjustment({ delta: '', reason: '' }); }}>طلب تعديل</button></div></td></tr>)}</tbody></table></div>{!overview.stock.length && <EmptyState icon={Boxes} title="لا يوجد رصيد بعد" text="سيظهر الرصيد بعد أول مزامنة من جهاز الموقع." />}</section>
+      <section className="panel table-panel"><PanelHeading title="المخزون الحالي" subtitle="الكميات والأسعار حسب الصنف والموقع؛ التعديل يتم كطلب موثق" /><div className="table-wrap"><table><thead><tr><th>الصنف</th><th>سعر البيع</th><th>التصنيف</th><th>الموقع</th><th>الكمية</th><th>آخر مزامنة</th><th>إجراء</th></tr></thead><tbody>{overview.stock.map((row) => <tr key={row.id}><td><strong>{row.name_ar}</strong></td><td><strong className="price-value">{formatMoney(String(row.retail_price_minor))} EGP</strong></td><td>{row.kind === 'PRODUCT' ? 'منتج' : 'خامة'}</td><td>{locationLabel(row.location)}</td><td><strong>{formatQuantity(row.quantity_scaled, row.quantity_scale)} {row.unit}</strong></td><td>{formatDate(row.as_of)}</td><td><div className="row-actions"><button onClick={() => { setAdjusting(row); setAdjustment({ delta: '', reason: '' }); }}>طلب تعديل</button></div></td></tr>)}</tbody></table></div>{!overview.stock.length && <EmptyState icon={Boxes} title="لا يوجد رصيد بعد" text="سيظهر الرصيد بعد أول مزامنة من جهاز الموقع." />}</section>
+      <section className="panel table-panel"><PanelHeading title="سجل حركات المخزون" subtitle="آخر ١٠٠ معاملة متزامنة؛ المرجع والمستخدم والسبب محفوظة في الخادم" /><div className="table-wrap"><table><thead><tr><th>الوقت</th><th>الحركة</th><th>الصنف</th><th>الموقع</th><th>فرق الكمية</th><th>المستخدم</th><th>السبب والمرجع</th></tr></thead><tbody>{overview.inventory_history.flatMap((movement) => movement.lines.map((line) => <tr key={`${movement.id}:${line.item_id}:${line.location}`}><td>{formatDate(movement.occurred_at)}</td><td>{movement.kind}</td><td>{line.name_ar}</td><td>{locationLabel(line.location)}</td><td className="ltr">{formatQuantity(line.delta_scaled, line.quantity_scale)} {line.unit}</td><td>{movement.user_name}</td><td>{movement.reason}<small className="cell-note ltr">{movement.reference_id}</small></td></tr>))}</tbody></table></div>{!overview.inventory_history.length && <EmptyState icon={Boxes} title="لا توجد حركات متزامنة" text="تظهر المعاملات بعد المزامنة من جهاز الفرع." />}</section>
       <section className="two-column"><article className="panel table-panel"><PanelHeading title="مبيعات اليوم" subtitle="الإيصالات الفعلية فقط، والإكراميات منفصلة" />{overview.sales.recent.length ? <div className="table-wrap"><table><thead><tr><th>الإيصال</th><th>الوردية</th><th>الصافي</th></tr></thead><tbody>{overview.sales.recent.map((sale) => <tr key={sale.id}><td className="ltr">{sale.receipt_number}</td><td>{sale.shift_kind === 'MORNING' ? 'صباحية' : 'مسائية'}</td><td>{formatMoney(sale.net_minor)} EGP</td></tr>)}</tbody></table></div> : <EmptyState compact icon={CircleDollarSign} title="لا مبيعات متزامنة" text="ستظهر الإيصالات هنا بعد اتصال جهاز الفرع." />}</article><article className="panel"><PanelHeading title="تفاصيل الفرع" subtitle="التشغيل والاتصال" /><dl className="detail-list"><div><dt>المنطقة الزمنية</dt><dd>{site.timezone}</dd></div><div><dt>حالة الموقع</dt><dd>{site.active ? 'نشط' : 'مؤرشف'}</dd></div><div><dt>نوع التشغيل</dt><dd>{siteTypeLabels[site.type]}</dd></div><div><dt>أنواع الأصناف</dt><dd>{new Set(overview.stock.map((row) => row.kind)).size}</dd></div></dl></article></section>
     </>}
   </div>;
@@ -572,11 +606,11 @@ function BranchDetail({ site, data, onBack, onUpdate, onArchive, onLoadOverview,
 
 function CatalogPage({ items, onCreate, onUpdate, onArchive }: {
   items: Item[];
-  onCreate: (input: Pick<Item, 'sku' | 'nameAr' | 'unit' | 'quantityScale' | 'retailPriceMinor' | 'kind'>) => Promise<void>;
+  onCreate: (input: Pick<Item, 'nameAr' | 'unit' | 'quantityScale' | 'retailPriceMinor' | 'kind'>) => Promise<void>;
   onUpdate: (id: string, input: Partial<Pick<Item, 'sku' | 'nameAr' | 'unit' | 'quantityScale' | 'retailPriceMinor' | 'kind' | 'active'>>) => Promise<void>;
   onArchive: (id: string) => Promise<void>;
 }) {
-  const blankForm = { sku: '', nameAr: '', unit: 'قطعة', quantityScale: 1, priceEgp: '', kind: 'PRODUCT' as Item['kind'] };
+  const blankForm = { nameAr: '', unit: 'قطعة', quantityScale: 1, priceEgp: '', kind: 'PRODUCT' as Item['kind'] };
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [confirmArchiveId, setConfirmArchiveId] = useState<string | null>(null);
@@ -592,7 +626,6 @@ function CatalogPage({ items, onCreate, onUpdate, onArchive }: {
       return;
     }
     const input = {
-      sku: form.sku,
       nameAr: form.nameAr,
       unit: form.unit,
       quantityScale: form.quantityScale,
@@ -612,7 +645,6 @@ function CatalogPage({ items, onCreate, onUpdate, onArchive }: {
 
   const edit = (item: Item) => {
     setForm({
-      sku: item.sku,
       nameAr: item.nameAr,
       unit: item.unit,
       quantityScale: item.quantityScale,
@@ -634,7 +666,6 @@ function CatalogPage({ items, onCreate, onUpdate, onArchive }: {
     <SectionToolbar count={`${items.length} أصناف`} action="إضافة صنف وسعره" onAction={() => { setEditingId(null); setForm(blankForm); setShowForm((value) => !value); }} />
     {message && <div className="form-error" role="alert">{message}</div>}
     {showForm && <form className="panel inline-form catalog-form priced-form" onSubmit={submit}>
-      <label>الكود<input className="ltr" value={form.sku} onChange={(event) => setForm({ ...form, sku: event.target.value })} required /></label>
       <label>الاسم العربي<input value={form.nameAr} onChange={(event) => setForm({ ...form, nameAr: event.target.value })} required /></label>
       <label>سعر البيع (جنيه)<input className="ltr" inputMode="decimal" value={form.priceEgp} onChange={(event) => setForm({ ...form, priceEgp: event.target.value })} placeholder="0.00" required /></label>
       <label>الوحدة<input value={form.unit} onChange={(event) => setForm({ ...form, unit: event.target.value })} required /></label>
@@ -645,8 +676,8 @@ function CatalogPage({ items, onCreate, onUpdate, onArchive }: {
     </form>}
     <section className="panel table-panel">
       <PanelHeading title="الأصناف والتسعيرات" subtitle="كل سعر بالجنيه المصري؛ أي تغيير جديد لا يمس أسعار الفواتير السابقة" />
-      <div className="table-wrap"><table><thead><tr><th>الصنف</th><th>الكود</th><th>سعر البيع</th><th>النوع</th><th>الوحدة</th><th>الحالة</th><th>إجراءات</th></tr></thead><tbody>
-        {items.map((item) => <tr key={item.id}><td><strong>{item.nameAr}</strong></td><td className="ltr">{item.sku}</td><td><strong className={item.retailPriceMinor === 0 ? 'price-missing' : 'price-value'}>{item.retailPriceMinor === 0 ? 'غير مسعّر' : `${formatMoney(String(item.retailPriceMinor))} EGP`}</strong></td><td>{item.kind === 'PRODUCT' ? 'منتج' : 'خامة'}</td><td>{item.unit}</td><td><span className={`pill ${item.active ? 'success' : 'neutral'}`}>{item.active ? 'نشط' : 'مؤرشف'}</span></td><td><div className="row-actions"><button onClick={() => edit(item)}>تعديل السعر والبيانات</button><button className={confirmArchiveId === item.id ? 'confirm-delete' : ''} disabled={!item.active} onClick={() => void archive(item.id)}>{confirmArchiveId === item.id ? 'تأكيد' : 'أرشفة'}</button></div></td></tr>)}
+      <div className="table-wrap"><table><thead><tr><th>الصنف</th><th>سعر البيع</th><th>النوع</th><th>الوحدة</th><th>الحالة</th><th>إجراءات</th></tr></thead><tbody>
+        {items.map((item) => <tr key={item.id}><td><strong>{item.nameAr}</strong></td><td><strong className={item.retailPriceMinor === 0 ? 'price-missing' : 'price-value'}>{item.retailPriceMinor === 0 ? 'غير مسعّر' : `${formatMoney(String(item.retailPriceMinor))} EGP`}</strong></td><td>{item.kind === 'PRODUCT' ? 'منتج' : 'خامة'}</td><td>{item.unit}</td><td><span className={`pill ${item.active ? 'success' : 'neutral'}`}>{item.active ? 'نشط' : 'مؤرشف'}</span></td><td><div className="row-actions"><button onClick={() => edit(item)}>تعديل السعر والبيانات</button><button className={confirmArchiveId === item.id ? 'confirm-delete' : ''} disabled={!item.active} onClick={() => void archive(item.id)}>{confirmArchiveId === item.id ? 'تأكيد' : 'أرشفة'}</button></div></td></tr>)}
       </tbody></table></div>
       {!items.length && <EmptyState icon={PackageSearch} title="الكتالوج فارغ" text="أضف المنتجات والخامات وأسعارها المركزية." />}
     </section>
@@ -730,7 +761,7 @@ function CafePage({ items, onLoad, onCreate, onUpdate, onArchive, onSetPrice }: 
       return <article key={item.id}><div><strong>{item.nameAr}</strong><small>{custom ? 'سعر خاص' : 'السعر الأساسي'}</small></div><span>{formatMoney(String(custom?.price_minor ?? item.retailPriceMinor))} EGP</span><button onClick={() => setPriceEdit({ itemId: item.id, value: moneyMinorToInput(custom?.price_minor ?? item.retailPriceMinor) })}>تغيير</button></article>;
     })}</div>{priceEdit && <form className="price-editor" onSubmit={savePrice}><label>السعر الجديد (جنيه)<input className="ltr" autoFocus inputMode="decimal" value={priceEdit.value} onChange={(event) => setPriceEdit({ ...priceEdit, value: event.target.value })} required /></label><button className="primary-button">نشر السعر</button><button type="button" className="secondary-button" onClick={() => setPriceEdit(null)}>إلغاء</button></form>}</section>
     <section className="two-column cafe-ledger"><article className="panel"><PanelHeading title="الحاجات اللي استلمها" subtitle="اضغط على فاتورة لرؤية الأصناف والكميات والأسعار المحفوظة" /><div className="invoice-list">{selected.invoices.map((invoice) => <button key={invoice.id} className={selectedInvoiceId === invoice.id ? 'selected' : ''} onClick={() => setSelectedInvoiceId(selectedInvoiceId === invoice.id ? null : invoice.id)}><span><strong>{invoice.number}</strong><small>{invoice.business_date} · {invoice.issuing_site.name}</small></span><span><strong>{formatMoney(invoice.net_minor)} EGP</strong><small>متبقي {formatMoney(invoice.outstanding_minor)}</small></span><ChevronLeft /></button>)}{!selected.invoices.length && <EmptyState compact icon={Boxes} title="لا توجد فواتير" text="ستظهر البضاعة بعد مزامنة أول فاتورة." />}</div></article><article className="panel"><PanelHeading title="الدفعات" subtitle="المبالغ المحصّلة فعلياً، منفصلة عن الإيراد" /><div className="payment-list">{selected.payments.map((payment) => <div key={payment.id}><span><strong>{formatMoney(payment.amount_minor)} EGP</strong><small>{payment.collected_at_site.name}</small></span><span><strong>{payment.reference}</strong><small>{formatDate(payment.occurred_at)}</small></span></div>)}{!selected.payments.length && <EmptyState compact icon={CircleDollarSign} title="لم يُحصّل شيء بعد" text="الرصيد ما زال مستحقاً." />}</div></article></section>
-    {selectedInvoice && <section className="panel table-panel invoice-detail"><PanelHeading title={`تفاصيل الفاتورة ${selectedInvoice.number}`} subtitle="الأسماء والأسعار هنا لقطات تاريخية لا تتغير عند تعديل التسعير" /><div className="table-wrap"><table><thead><tr><th>الصنف</th><th>الكمية</th><th>سعر الوحدة</th><th>الإجمالي</th></tr></thead><tbody>{selectedInvoice.lines.map((line) => <tr key={line.id}><td><strong>{line.name_ar}</strong><small className="cell-note ltr">{line.sku}</small></td><td>{formatQuantity(line.quantity_scaled, line.quantity_scale)} {line.unit}</td><td>{formatMoney(String(line.unit_price_minor))} EGP</td><td><strong>{formatMoney(line.total_minor)} EGP</strong></td></tr>)}</tbody></table></div></section>}
+    {selectedInvoice && <section className="panel table-panel invoice-detail"><PanelHeading title={`تفاصيل الفاتورة ${selectedInvoice.number}`} subtitle="الأسماء والأسعار هنا لقطات تاريخية لا تتغير عند تعديل التسعير" /><div className="table-wrap"><table><thead><tr><th>الصنف</th><th>الكمية</th><th>سعر الوحدة</th><th>الإجمالي</th></tr></thead><tbody>{selectedInvoice.lines.map((line) => <tr key={line.id}><td><strong>{line.name_ar}</strong></td><td>{formatQuantity(line.quantity_scaled, line.quantity_scale)} {line.unit}</td><td>{formatMoney(String(line.unit_price_minor))} EGP</td><td><strong>{formatMoney(line.total_minor)} EGP</strong></td></tr>)}</tbody></table></div></section>}
   </div>;
 
   return <div className="page-stack">
@@ -748,16 +779,49 @@ function CafeCustomerForm({ form, setForm, editing, onSubmit, onCancel }: { form
   return <form className="panel inline-form cafe-customer-form" onSubmit={onSubmit}><label>كود الحساب<input className="ltr" value={form.code} onChange={(event) => setForm({ ...form, code: event.target.value })} required /></label><label>اسم الكافيه<input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} required /></label><label>بيانات التواصل<input value={form.contact ?? ''} onChange={(event) => setForm({ ...form, contact: event.target.value })} /></label><label>ملاحظات<input value={form.notes ?? ''} onChange={(event) => setForm({ ...form, notes: event.target.value })} /></label><button className="primary-button">{editing ? 'حفظ التعديل' : 'إضافة الحساب'}</button><button type="button" className="secondary-button" onClick={onCancel}>إلغاء</button></form>;
 }
 
-function KitchenPage({ data, onLoad }: { data: AdminData; onLoad: () => Promise<KitchenOverview> }) {
+function KitchenPage({ data, onLoad, token }: { data: AdminData; onLoad: () => Promise<KitchenOverview>; token: string }) {
   const [overview, setOverview] = useState<KitchenOverview | null>(null);
+  const [recipes, setRecipes] = useState<KitchenRecipe[]>([]);
+  const [productId, setProductId] = useState('');
+  const [output, setOutput] = useState('1');
+  const [amounts, setAmounts] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
   useEffect(() => { let mounted = true; onLoad().then((result) => { if (mounted) setOverview(result); }).catch((caught) => { if (mounted) setMessage(friendlyError(caught)); }); return () => { mounted = false; }; }, [onLoad]);
-  const ingredients = data.items.filter((item) => item.kind === 'INGREDIENT');
+  useEffect(() => { let mounted = true; api.kitchenRecipes(token).then((result) => { if (mounted) setRecipes(result); }).catch((caught) => { if (mounted) setMessage(friendlyError(caught)); }); return () => { mounted = false; }; }, [token]);
+  const ingredients = data.items.filter((item) => item.kind === 'INGREDIENT' && item.active);
+  const products = data.items.filter((item) => item.kind === 'PRODUCT' && item.active);
+  const chooseProduct = (nextId: string) => {
+    setProductId(nextId);
+    const existing = recipes.find((recipe) => recipe.productItemId === nextId);
+    const product = products.find((item) => item.id === nextId);
+    setOutput(existing && product ? String(Number(existing.outputScaled) / product.quantityScale) : '1');
+    setAmounts(Object.fromEntries((existing?.components ?? []).map((component) => [component.ingredientItemId, String(Number(component.quantityScaled) / component.ingredient.quantityScale)])));
+  };
+  const saveRecipe = async (event: FormEvent) => {
+    event.preventDefault(); setMessage('');
+    const product = products.find((item) => item.id === productId);
+    if (!product) return;
+    const outputScaled = Number(output) * product.quantityScale;
+    const components = ingredients.flatMap((ingredient) => {
+      const value = Number(amounts[ingredient.id] || 0) * ingredient.quantityScale;
+      return value > 0 ? [{ ingredientItemId: ingredient.id, quantityScaled: value }] : [];
+    });
+    if (!Number.isSafeInteger(outputScaled) || outputScaled < 1 || !components.length || components.some((line) => !Number.isSafeInteger(line.quantityScaled))) { setMessage('أدخل كميات صحيحة حسب وحدات القياس وأضف خامة واحدة على الأقل.'); return; }
+    setSaving(true);
+    try {
+      const existing = recipes.find((recipe) => recipe.productItemId === productId);
+      const saved = await api.saveKitchenRecipe(token, productId, { outputScaled, expectedVersion: existing?.version ?? 0, components });
+      setRecipes((current) => [...current.filter((recipe) => recipe.productItemId !== productId), saved]);
+      setMessage('تم نشر الوصفة للمطبخ. الشحنات الجديدة ستحفظ نسخة الوصفة وتخصم الخامات تلقائياً.');
+    } catch (caught) { setMessage(friendlyError(caught)); } finally { setSaving(false); }
+  };
   const reviewCount = overview?.variances.filter((row) => BigInt(row.unexplained_variance_scaled) !== 0n).length ?? 0;
   return <div className="page-stack">
     {message && <div className="form-error" role="alert">{message}</div>}
+    <form className="panel role-editor" onSubmit={saveRecipe}><PanelHeading title="وصفات الإنتاج" subtitle="حدد الخامات المطلوبة لكمية إنتاج واحدة؛ المطبخ يخصمها مرة واحدة عند اعتماد الشحنة" /><div className="inline-form role-name-fields"><label>المنتج<select value={productId} onChange={(event) => chooseProduct(event.target.value)} required><option value="">اختر المنتج</option>{products.map((item) => <option key={item.id} value={item.id}>{item.nameAr}</option>)}</select></label><label>كمية الناتج<input className="ltr" inputMode="decimal" min="0.001" value={output} onChange={(event) => setOutput(event.target.value)} required /></label></div>{productId && <fieldset><legend>الخامات لكل كمية ناتج</legend><div className="permission-grid">{ingredients.map((ingredient) => <label key={ingredient.id} className={Number(amounts[ingredient.id] || 0) > 0 ? 'selected' : ''}><span><strong>{ingredient.nameAr}</strong><small>{ingredient.unit}</small></span><input className="ltr quantity-cell" inputMode="decimal" min="0" value={amounts[ingredient.id] ?? ''} onChange={(event) => setAmounts({ ...amounts, [ingredient.id]: event.target.value })} placeholder="0" /></label>)}</div></fieldset>}<div className="form-actions"><button className="primary-button" disabled={saving || !productId}>{saving ? 'جارٍ الحفظ…' : recipes.some((recipe) => recipe.productItemId === productId) ? 'نشر نسخة وصفة جديدة' : 'نشر الوصفة'}</button></div></form>
     <section className="stats-grid compact"><StatCard label="الخامات المسجلة" value={String(ingredients.length)} note="في الكتالوج المركزي" icon={Boxes} tone="orange" /><StatCard label="أرصدة متزامنة" value={String(overview?.stock.length ?? 0)} note="حسب آخر اتصال" icon={ChefHat} tone="indigo" /><StatCard label="فروق تحتاج مراجعة" value={String(reviewCount)} note="غير الهالك المسجل" icon={AlertTriangle} tone="blue" /></section>
-    {!overview ? <div className="panel mini-loading"><RefreshCw className="spin" /> جارٍ تحميل بيانات المطبخ…</div> : <section className="two-column kitchen-columns"><article className="panel table-panel"><PanelHeading title="رصيد الخامات" subtitle="الرصيد وآخر وقت مزامنة" /><div className="table-wrap"><table><thead><tr><th>الخامة</th><th>الكمية</th><th>حتى</th></tr></thead><tbody>{overview.stock.map((row) => <tr key={row.id}><td><strong>{row.name_ar}</strong><small className="cell-note ltr">{row.sku}</small></td><td>{formatQuantity(row.quantity_scaled, row.quantity_scale)} {row.unit}</td><td>{formatDate(row.as_of)}</td></tr>)}</tbody></table></div></article><article className="panel table-panel"><PanelHeading title="الهالك وفروق الجرد" subtitle="الهالك المسجل منفصل دائماً عن النقص غير المفسر" /><div className="table-wrap"><table><thead><tr><th>الخامة</th><th>هالك مسجل</th><th>فرق غير مفسر</th><th>التاريخ</th></tr></thead><tbody>{overview.variances.map((row) => <tr key={row.id}><td><strong>{row.name_ar}</strong></td><td>{formatQuantity(row.recorded_waste_scaled, row.quantity_scale)} {row.unit}</td><td><strong className={BigInt(row.unexplained_variance_scaled) > 0n ? 'price-missing' : ''}>{formatQuantity(row.unexplained_variance_scaled, row.quantity_scale)} {row.unit}</strong></td><td>{row.business_date}</td></tr>)}</tbody></table></div></article></section>}
+    {!overview ? <div className="panel mini-loading"><RefreshCw className="spin" /> جارٍ تحميل بيانات المطبخ…</div> : <><section className="two-column kitchen-columns"><article className="panel table-panel"><PanelHeading title="طلبات الفروع" subtitle="كل الفروع تستخدم نفس مسار الطلب" /><div className="table-wrap"><table><thead><tr><th>الفرع</th><th>الأصناف</th><th>الحالة</th><th>وقت الطلب</th></tr></thead><tbody>{overview.requests.map((row) => <tr key={row.id}><td><strong>{row.branch.name}</strong></td><td>{row.line_count}</td><td><span className="pill warning">{row.status}</span></td><td>{formatDate(row.submitted_at)}</td></tr>)}</tbody></table></div></article><article className="panel table-panel"><PanelHeading title="الشحنات والوارد" subtitle="حالة الإرسال والاستلام من قاعدة الخادم" /><div className="table-wrap"><table><thead><tr><th>المرجع</th><th>الفرع</th><th>الحالة</th><th>وقت الإرسال</th></tr></thead><tbody>{overview.shipments.map((row) => <tr key={row.id}><td><strong>{row.reference}</strong></td><td>{row.branch.name}</td><td><span className={`pill ${row.status === 'CONFLICT' ? 'danger' : row.status === 'RECEIVED' ? 'success' : 'warning'}`}>{row.status}</span></td><td>{formatDate(row.dispatched_at)}</td></tr>)}</tbody></table></div></article></section><section className="two-column kitchen-columns"><article className="panel table-panel"><PanelHeading title="رصيد الخامات" subtitle="الرصيد وآخر وقت مزامنة" /><div className="table-wrap"><table><thead><tr><th>الخامة</th><th>الكمية</th><th>حتى</th></tr></thead><tbody>{overview.stock.map((row) => <tr key={row.id}><td><strong>{row.name_ar}</strong></td><td>{formatQuantity(row.quantity_scaled, row.quantity_scale)} {row.unit}</td><td>{formatDate(row.as_of)}</td></tr>)}</tbody></table></div></article><article className="panel table-panel"><PanelHeading title="الهالك وفروق الجرد" subtitle="الهالك المسجل منفصل دائماً عن النقص غير المفسر" /><div className="table-wrap"><table><thead><tr><th>الخامة</th><th>هالك مسجل</th><th>فرق غير مفسر</th><th>التاريخ</th></tr></thead><tbody>{overview.variances.map((row) => <tr key={row.id}><td><strong>{row.name_ar}</strong></td><td>{formatQuantity(row.recorded_waste_scaled, row.quantity_scale)} {row.unit}</td><td><strong className={BigInt(row.unexplained_variance_scaled) > 0n ? 'price-missing' : ''}>{formatQuantity(row.unexplained_variance_scaled, row.quantity_scale)} {row.unit}</strong></td><td>{row.business_date}</td></tr>)}</tbody></table></div></article></section></>}
   </div>;
 }
 
@@ -800,44 +864,60 @@ function TeamPage({ users, roles, sites, onCreateUser, onUpdateUser, onArchiveUs
   const [editingId, setEditingId] = useState<string | null>(null);
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const [message, setMessage] = useState('');
+  const [changePassword, setChangePassword] = useState(false);
   const [userForm, setUserForm] = useState({ username: '', displayName: '', password: '', roleId: roles[0]?.id || '', siteId: '' });
   const [roleForm, setRoleForm] = useState<{ code: string; name: string; permissions: string[] }>({ code: '', name: '', permissions: [] });
 
+  useEffect(() => {
+    if (!userForm.roleId) {
+      const firstActiveRole = roles.find((role) => role.active !== false);
+      if (firstActiveRole) setUserForm((current) => ({ ...current, roleId: firstActiveRole.id }));
+    }
+  }, [roles, userForm.roleId]);
+
   const reset = (nextTab = tab) => {
-    setEditingId(null); setMessage('');
+    setEditingId(null); setChangePassword(false); setMessage('');
     setUserForm({ username: '', displayName: '', password: '', roleId: roles.find((role) => role.active !== false)?.id || '', siteId: '' });
     setRoleForm({ code: '', name: '', permissions: [] });
     setShowForm(false); setTab(nextTab);
   };
-  const editUser = (user: User) => { const assignment = user.siteRoles[0]; setTab('users'); setEditingId(user.id); setUserForm({ username: user.username, displayName: user.displayName, password: '', roleId: assignment?.role.id || '', siteId: assignment?.site?.id || '' }); setShowForm(true); };
+  const editUser = (user: User) => { setChangePassword(false); const assignment = user.siteRoles[0]; setTab('users'); setEditingId(user.id); setUserForm({ username: user.username, displayName: user.displayName, password: '', roleId: assignment?.role.id || roles.find((role) => role.active !== false)?.id || '', siteId: assignment?.site?.id || '' }); setShowForm(true); };
   const editRole = (role: Role) => { setTab('roles'); setEditingId(role.id); setRoleForm({ code: role.code, name: role.name, permissions: role.permissions }); setShowForm(true); };
-  const submitUser = async (event: FormEvent) => { event.preventDefault(); setMessage(''); try { const input = { ...userForm, ...(userForm.siteId ? {} : { siteId: undefined }), ...(userForm.password ? {} : { password: undefined }) }; if (editingId) await onUpdateUser(editingId, input); else await onCreateUser({ ...userForm, ...(userForm.siteId ? {} : { siteId: undefined }) }); reset('users'); } catch (caught) { setMessage(friendlyError(caught)); } };
+  const submitUser = async (event: FormEvent) => { event.preventDefault(); setMessage(''); if (!roles.some((role) => role.id === userForm.roleId && role.active !== false)) { setMessage('اختر دوراً صالحاً قبل الحفظ.'); return; } try { const input = { ...userForm, ...(userForm.siteId ? {} : { siteId: undefined }), ...(!editingId || changePassword ? {} : { password: undefined }) }; if (editingId) await onUpdateUser(editingId, input); else await onCreateUser({ ...userForm, ...(userForm.siteId ? {} : { siteId: undefined }) }); reset('users'); } catch (caught) { setMessage(friendlyError(caught)); } };
   const submitRole = async (event: FormEvent) => { event.preventDefault(); setMessage(''); try { if (editingId) await onUpdateRole(editingId, roleForm); else await onCreateRole(roleForm); reset('roles'); } catch (caught) { setMessage(friendlyError(caught)); } };
   const archive = async (id: string) => { if (confirmId !== id) { setConfirmId(id); return; } setMessage(''); try { if (tab === 'users') await onArchiveUser(id); else await onArchiveRole(id); setConfirmId(null); } catch (caught) { setMessage(friendlyError(caught)); } };
 
   return <div className="page-stack">
     <div className="tab-toolbar"><div><button className={tab === 'users' ? 'active' : ''} onClick={() => reset('users')}>المستخدمون <span>{users.length}</span></button><button className={tab === 'roles' ? 'active' : ''} onClick={() => reset('roles')}>الأدوار <span>{roles.length}</span></button></div><button className="primary-button" onClick={() => { setEditingId(null); setShowForm((value) => !value); }}>{tab === 'users' ? '+ مستخدم جديد' : '+ دور جديد'}</button></div>
     {message && <div className="form-error" role="alert">{message}</div>}
-    {showForm && tab === 'users' && <form className="panel inline-form user-form" onSubmit={submitUser}><label>الاسم<input value={userForm.displayName} onChange={(event) => setUserForm({ ...userForm, displayName: event.target.value })} required /></label><label>اسم المستخدم<input className="ltr" value={userForm.username} onChange={(event) => setUserForm({ ...userForm, username: event.target.value })} required /></label><label>كلمة المرور<input type="password" value={userForm.password} onChange={(event) => setUserForm({ ...userForm, password: event.target.value })} required={!editingId} minLength={editingId ? undefined : 12} placeholder={editingId ? 'اتركها فارغة دون تغيير' : '١٢ حرفاً على الأقل'} /></label><label>الدور<select value={userForm.roleId} onChange={(event) => setUserForm({ ...userForm, roleId: event.target.value })} required>{roles.filter((role) => role.active !== false).map((role) => <option value={role.id} key={role.id}>{role.name}</option>)}</select></label><label>نطاق الموقع<select value={userForm.siteId} onChange={(event) => setUserForm({ ...userForm, siteId: event.target.value })}><option value="">كل المواقع</option>{sites.filter((site) => site.active).map((site) => <option value={site.id} key={site.id}>{site.name}</option>)}</select></label><button className="primary-button">{editingId ? 'حفظ' : 'إضافة'}</button></form>}
+    {showForm && tab === 'users' && <form className="panel inline-form user-form" onSubmit={submitUser}><label>الاسم<input value={userForm.displayName} onChange={(event) => setUserForm({ ...userForm, displayName: event.target.value })} required /></label><label>اسم المستخدم<input className="ltr" value={userForm.username} onChange={(event) => setUserForm({ ...userForm, username: event.target.value })} required /></label>{editingId && <label><span><input type="checkbox" checked={changePassword} onChange={(event) => { setChangePassword(event.target.checked); setUserForm({ ...userForm, password: '' }); }} /> تغيير كلمة المرور</span><small>منح الصلاحيات يحافظ على كلمة المرور الحالية</small></label>}{(!editingId || changePassword) && <label>كلمة المرور الجديدة<input type="password" autoComplete="new-password" value={userForm.password} onChange={(event) => setUserForm({ ...userForm, password: event.target.value })} required minLength={12} placeholder="١٢ حرفاً على الأقل" /></label>}<label>الدور<select value={userForm.roleId} onChange={(event) => setUserForm({ ...userForm, roleId: event.target.value })} required>{roles.filter((role) => role.active !== false).map((role) => <option value={role.id} key={role.id}>{role.name}</option>)}</select></label><label>نطاق الموقع<select value={userForm.siteId} onChange={(event) => setUserForm({ ...userForm, siteId: event.target.value })}><option value="">كل المواقع</option>{sites.filter((site) => site.active).map((site) => <option value={site.id} key={site.id}>{site.name}</option>)}</select></label><button className="primary-button">{editingId ? 'حفظ' : 'إضافة'}</button></form>}
     {showForm && tab === 'roles' && <form className="panel role-editor" onSubmit={submitRole}><div className="inline-form role-name-fields"><label>الكود<input className="ltr" value={roleForm.code} onChange={(event) => setRoleForm({ ...roleForm, code: event.target.value })} required /></label><label>اسم الدور<input value={roleForm.name} onChange={(event) => setRoleForm({ ...roleForm, name: event.target.value })} required /></label></div><fieldset><legend>اختَر ما يستطيع هذا الدور فعله</legend><div className="permission-grid">{permissionOptions.map((permission) => <label key={permission.code} className={roleForm.permissions.includes(permission.code) ? 'selected' : ''}><input type="checkbox" checked={roleForm.permissions.includes(permission.code)} onChange={(event) => { const next = event.target.checked ? [...roleForm.permissions.filter((code) => permission.code === '*' || code !== '*'), permission.code] : roleForm.permissions.filter((code) => code !== permission.code); setRoleForm({ ...roleForm, permissions: permission.code === '*' && event.target.checked ? ['*'] : next }); }} /><span><strong>{permission.label}</strong><small className="ltr">{permission.code}</small></span></label>)}</div></fieldset><div className="form-actions"><button className="primary-button">{editingId ? 'حفظ الصلاحيات' : 'إضافة الدور'}</button><button type="button" className="secondary-button" onClick={() => reset('roles')}>إلغاء</button></div></form>}
-    {tab === 'users' ? <section className="panel table-panel"><PanelHeading title="المستخدمون" subtitle="حسابات مسمّاة؛ لا تُعرض كلمات المرور أو تجزئاتها" /><div className="table-wrap"><table><thead><tr><th>الاسم</th><th>اسم المستخدم</th><th>الدور</th><th>النطاق</th><th>الحالة</th><th>إجراءات</th></tr></thead><tbody>{users.map((user) => <tr key={user.id}><td><strong>{user.displayName}</strong></td><td className="ltr">{user.username}</td><td>{user.siteRoles.map((entry) => entry.role.name).join('، ') || 'بدون دور'}</td><td>{user.siteRoles.map((entry) => entry.site?.name || 'كل المواقع').join('، ') || '—'}</td><td><span className={`pill ${user.active ? 'success' : 'neutral'}`}>{user.active ? 'نشط' : 'موقوف'}</span></td><td><div className="row-actions"><button onClick={() => editUser(user)}>تعديل</button><button disabled={!user.active} className={confirmId === user.id ? 'confirm-delete' : ''} onClick={() => void archive(user.id)}>{confirmId === user.id ? 'تأكيد' : 'إيقاف'}</button></div></td></tr>)}</tbody></table></div></section> : <section className="panel role-list"><PanelHeading title="الأدوار والصلاحيات" subtitle="صلاحيات واضحة قابلة للتعديل وتُخزن على الخادم" />{roles.map((role) => <div key={role.id}><span className="role-icon"><ShieldCheck /></span><div className="grow"><strong>{role.name}</strong><small>{role.code}</small><div className="permission-chips">{role.permissions.includes('*') ? <span>كل صلاحيات النظام</span> : role.permissions.slice(0, 4).map((permission) => <span key={permission}>{permissionLabel(permission)}</span>)}{role.permissions.length > 4 && <span>+{role.permissions.length - 4}</span>}</div></div><span className={`pill ${role.active !== false ? 'success' : 'neutral'}`}>{role.active !== false ? 'نشط' : 'مؤرشف'}</span><div className="row-actions"><button onClick={() => editRole(role)}>تعديل</button><button disabled={role.active === false} className={confirmId === role.id ? 'confirm-delete' : ''} onClick={() => void archive(role.id)}>{confirmId === role.id ? 'تأكيد' : 'أرشفة'}</button></div></div>)}</section>}
+    {tab === 'users' ? <section className="panel table-panel"><PanelHeading title="المستخدمون" subtitle="حسابات مسمّاة؛ لا تُعرض كلمات المرور أو تجزئاتها" /><div className="table-wrap"><table><thead><tr><th>الاسم</th><th>اسم المستخدم</th><th>الدور</th><th>النطاق</th><th>الحالة</th><th>إجراءات</th></tr></thead><tbody>{users.map((user) => <tr key={user.id}><td><strong>{user.displayName}</strong></td><td className="ltr">{user.username}</td><td>{user.siteRoles.map((entry) => entry.role.name).join('، ') || 'بدون دور'}</td><td>{user.siteRoles.map((entry) => entry.site?.name || 'كل المواقع').join('، ') || '—'}</td><td><span className={`pill ${user.status === 'PENDING_PERMISSION' ? 'warning' : user.active ? 'success' : 'neutral'}`}>{user.status === 'PENDING_PERMISSION' ? 'بانتظار الصلاحيات' : user.active ? 'نشط' : 'موقوف'}</span></td><td><div className="row-actions"><button onClick={() => editUser(user)}>{user.status === 'PENDING_PERMISSION' ? 'منح صلاحية' : 'تعديل'}</button><button disabled={!user.active} className={confirmId === user.id ? 'confirm-delete' : ''} onClick={() => void archive(user.id)}>{confirmId === user.id ? 'تأكيد' : 'إيقاف'}</button></div></td></tr>)}</tbody></table></div></section> : <section className="panel role-list"><PanelHeading title="الأدوار والصلاحيات" subtitle="صلاحيات واضحة قابلة للتعديل وتُخزن على الخادم" />{roles.map((role) => <div key={role.id}><span className="role-icon"><ShieldCheck /></span><div className="grow"><strong>{role.name}</strong><small>{role.code}</small><div className="permission-chips">{role.permissions.includes('*') ? <span>كل صلاحيات النظام</span> : role.permissions.slice(0, 4).map((permission) => <span key={permission}>{permissionLabel(permission)}</span>)}{role.permissions.length > 4 && <span>+{role.permissions.length - 4}</span>}</div></div><span className={`pill ${role.active !== false ? 'success' : 'neutral'}`}>{role.active !== false ? 'نشط' : 'مؤرشف'}</span><div className="row-actions"><button onClick={() => editRole(role)}>تعديل</button><button disabled={role.active === false} className={confirmId === role.id ? 'confirm-delete' : ''} onClick={() => void archive(role.id)}>{confirmId === role.id ? 'تأكيد' : 'أرشفة'}</button></div></div>)}</section>}
   </div>;
 }
 
-function OperationsPage({ data, onIssueEnrollmentToken }: { data: AdminData; onIssueEnrollmentToken: (siteId: string) => Promise<{ id: string; token: string; siteId: string; profile: SiteType; expiresAt: string }> }) {
-  const [touchInstallers, setTouchInstallers] = useState<Record<SiteType, boolean>>({ BRANCH_TYPE_1: false, BRANCH_TYPE_2: false, KITCHEN: true });
+function OperationsPage({ data, onIssueEnrollmentToken, token }: { data: AdminData; token: string; onIssueEnrollmentToken: (siteId: string) => Promise<{ id: string; token: string; siteId: string; profile: SiteType; expiresAt: string }> }) {
   const [enrollment, setEnrollment] = useState<{ token: string; siteId: string; expiresAt: string } | null>(null);
+  const [downloading, setDownloading] = useState<string | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState(0);
   const [busySite, setBusySite] = useState<string | null>(null);
   const [message, setMessage] = useState('');
-  const profiles: SiteType[] = ['BRANCH_TYPE_1', 'BRANCH_TYPE_2', 'KITCHEN'];
+  const [branchOneRelease, setBranchOneRelease] = useState<Awaited<ReturnType<typeof api.branchOneRelease>> | null>(null);
+  const [branchOneTouchRelease, setBranchOneTouchRelease] = useState<Awaited<ReturnType<typeof api.branchOneTouchRelease>> | null>(null);
+  const [kitchenRelease, setKitchenRelease] = useState<Awaited<ReturnType<typeof api.kitchenRelease>> | null>(null);
+  const [branchTwoRelease, setBranchTwoRelease] = useState<Awaited<ReturnType<typeof api.branchTwoRelease>> | null>(null);
+  useEffect(() => { void api.branchOneRelease(token).then(setBranchOneRelease).catch(() => setBranchOneRelease(null)); }, [token]);
+  useEffect(() => { void api.branchOneTouchRelease(token).then(setBranchOneTouchRelease).catch(() => setBranchOneTouchRelease(null)); }, [token]);
+  useEffect(() => { void api.kitchenRelease(token).then(setKitchenRelease).catch(() => setKitchenRelease(null)); }, [token]);
+  useEffect(() => { void api.branchTwoRelease(token).then(setBranchTwoRelease).catch(() => setBranchTwoRelease(null)); }, [token]);
   return <div className="page-stack">
-    <section className="panel enrollment-panel"><PanelHeading title="تسجيل جهاز جديد" subtitle="رمز واحد صالح لمدة ٣٠ دقيقة ولا يظهر مرة أخرى" /><div className="enrollment-sites">{data.sites.filter((site) => site.active).map((site) => <button key={site.id} disabled={busySite === site.id} onClick={async () => { setBusySite(site.id); setMessage(''); try { const result = await onIssueEnrollmentToken(site.id); setEnrollment(result); } catch (caught) { setMessage(friendlyError(caught)); } finally { setBusySite(null); } }}><span className="site-icon"><MonitorSmartphone /></span><span><strong>{site.name}</strong><small>{siteTypeLabels[site.type]}</small></span><span>إنشاء رمز</span></button>)}</div>{message && <div className="form-error">{message}</div>}{enrollment && <div className="one-time-token"><div><strong>رمز التسجيل</strong><small>ينتهي {formatDate(enrollment.expiresAt)}</small></div><code>{enrollment.token}</code><button className="secondary-button" onClick={() => { void navigator.clipboard.writeText(enrollment.token); }}>نسخ الرمز</button></div>}</section>
+    <section className="panel enrollment-panel"><PanelHeading title="إعداد أجهزة الفروع" subtitle="عنوان الخادم والمواقع محفوظان هنا؛ أنشئ رمز ربط جديداً عند إعداد كل جهاز" /><div className="detail-list"><div><dt>عنوان الخادم في التطبيق</dt><dd className="ltr">https://ascendyz.xyz/api/v1</dd></div><div><dt>طريقة الربط</dt><dd>الإعدادات ← ربط الجهاز بالخادم ← الصق العنوان والرمز</dd></div></div><div className="enrollment-sites">{data.sites.filter((site) => site.active).map((site) => <button key={site.id} disabled={busySite === site.id} onClick={async () => { setBusySite(site.id); setMessage(''); try { const result = await onIssueEnrollmentToken(site.id); setEnrollment(result); } catch (caught) { setMessage(friendlyError(caught)); } finally { setBusySite(null); } }}><span className="site-icon"><MonitorSmartphone /></span><span><strong>{site.name}</strong><small>{site.code} · {siteTypeLabels[site.type]}</small></span><span>إنشاء رمز ربط</span></button>)}</div>{message && <div className="form-error">{message}</div>}{enrollment && <div className="one-time-token"><div><strong>رمز ربط لمرة واحدة</strong><small>ينتهي {formatDate(enrollment.expiresAt)}. انسخه الآن؛ يمكنك إصدار رمز جديد لاحقاً.</small></div><code>{enrollment.token}</code><button className="secondary-button" onClick={() => { void navigator.clipboard.writeText(enrollment.token); }}>نسخ الرمز</button></div>}</section>
     <section className="panel table-panel"><PanelHeading title="الأجهزة والمزامنة" subtitle="حالة التسجيل وآخر اتصال لكل جهاز" /><div className="table-wrap"><table><thead><tr><th>الجهاز</th><th>الموقع</th><th>الملف</th><th>التسجيل</th><th>آخر ظهور</th><th>الإصدار</th></tr></thead><tbody>{data.devices.map((device) => <tr key={device.id}><td className="ltr">{device.id.slice(0, 8)}</td><td>{data.sites.find((site) => site.id === device.siteId)?.name || 'موقع غير معروف'}</td><td>{siteTypeLabels[device.profile]}</td><td><span className={`pill ${device.enrollmentStatus === 'ENROLLED' ? 'success' : device.enrollmentStatus === 'REVOKED' ? 'danger' : 'warning'}`}>{device.enrollmentStatus === 'ENROLLED' ? 'مسجل' : device.enrollmentStatus === 'REVOKED' ? 'ملغي' : 'بانتظار التسجيل'}</span></td><td>{device.lastSeenAt ? formatDate(device.lastSeenAt) : 'لم يتصل بعد'}</td><td>{device.appVersion || '—'}</td></tr>)}</tbody></table></div>{!data.devices.length && <EmptyState icon={MonitorSmartphone} title="لا توجد أجهزة" text="سيظهر الجهاز بعد إصدار رمز تسجيل لأحد المواقع." />}</section>
     <section className="two-column">
       <article className="panel backup-panel"><PanelHeading title="النسخ الاحتياطي" subtitle="PostgreSQL وسجل الملفات التشغيلية" /><div className="backup-visual"><DatabaseBackup size={34} /><div><strong>لم تُسجل نسخة خارجية بعد</strong><p>يلزم تحديد وجهة VPS مشفّرة وسياسة الاحتفاظ قبل التفعيل.</p></div></div><dl className="detail-list"><div><dt>قاعدة البيانات</dt><dd><span className="status-good">جاهزة</span></dd></div><div><dt>الهدف المقترح</dt><dd>RPO ساعة / RTO ٤ ساعات</dd></div><div><dt>اختبار الاستعادة</dt><dd>بانتظار إعداد الوجهة</dd></div></dl><button className="secondary-button" disabled>تشغيل نسخة الآن</button></article>
       <article className="panel"><PanelHeading title="تقارير الورديات" subtitle="ملفات Excel الأصلية لا تُستبدل" /><EmptyState compact icon={FileSpreadsheet} title="لا توجد تقارير مرفوعة" text="ستظهر ملفات .xlsx بعد إغلاق أول وردية ومزامنتها." /></article>
     </section>
-    <section className="panel installers"><PanelHeading title="تطبيقات نقاط التشغيل" subtitle="اختَر نمط الواجهة قبل تنزيل المثبت المناسب" /><div className="installer-grid">{profiles.map((profile) => <article key={profile}><div className="installer-icon"><Download /></div><div><h3>{siteTypeLabels[profile]}</h3><p>Windows x64 · قناة مستقرة</p></div><label className="switch-row"><input type="checkbox" checked={touchInstallers[profile]} onChange={(event) => setTouchInstallers({ ...touchInstallers, [profile]: event.target.checked })} /><span className="switch" /><span>تهيئة شاشة لمس</span></label><button className="secondary-button" disabled><Download size={17} /> الإصدار قيد التجهيز</button></article>)}</div><p className="installer-note"><ShieldCheck size={17} /> المثبتات المنشورة ستكون موقعة، محددة الملف، ولا تحتوي بيانات فرع أو أسرار أو نسخة قاعدة بيانات.</p></section>
+    <section className="panel installers">{message && <div className="form-error" role="alert">{message}</div>}<PanelHeading title="تنزيل تطبيقات نقاط التشغيل" subtitle="مثبتات Windows ذاتية الاحتواء؛ تحقق من SHA-256 بعد التنزيل" /><div className="installer-grid">{([{ label: 'فرع نوع ١ · مكتبي', release: branchOneRelease, variant: 'desktop' }, { label: 'فرع نوع ١ · لمس', release: branchOneTouchRelease, variant: 'touch' }, { label: 'المطبخ · لمس', release: kitchenRelease, variant: 'kitchen' }, { label: siteTypeLabels.BRANCH_TYPE_2, release: branchTwoRelease, variant: 'branch2' }] as const).map(({ label, release, variant }) => <article key={label}><div className="installer-icon"><Download /></div><div><h3>{label}</h3><p>{release ? `Windows x64 · ${release.version} · ${formatDate(release.publishedAt)}` : 'لا يوجد إصدار منشور حالياً'}</p></div><button className="secondary-button" disabled={!release || !variant || downloading !== null} onClick={async () => { if (!variant) return; setDownloading(variant); setDownloadProgress(0); setMessage(''); try { if (variant === 'kitchen') await api.downloadKitchen(token, setDownloadProgress); else if (variant === 'branch2') await api.downloadBranchTwo(token, setDownloadProgress); else await api.downloadBranchOne(token, variant, setDownloadProgress); } catch (caught) { setMessage(friendlyError(caught)); } finally { setDownloading(null); } }}><Download size={17} /> {downloading === variant ? `جارٍ التنزيل ${downloadProgress}%` : release ? 'تنزيل المثبت' : 'غير متاح'}</button>{release && <small className="ltr">SHA-256: {release.sha256}</small>}</article>)}</div></section>
   </div>;
 }
 

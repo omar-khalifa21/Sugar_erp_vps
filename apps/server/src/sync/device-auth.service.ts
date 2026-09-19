@@ -8,7 +8,7 @@ import { PrismaService } from '../prisma/prisma.service';
 export class DeviceAuthService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async authenticate(deviceId?: string, credential?: string) {
+  async authenticate(deviceId?: string, credential?: string, appVersion?: string) {
     if (!deviceId || !credential) throw new UnauthorizedException('Device credentials are required');
     const device = await this.prisma.device.findUnique({ where: { id: deviceId } });
     const actual = Buffer.from(device?.credentialHash || '', 'utf8');
@@ -22,7 +22,8 @@ export class DeviceAuthService {
     ) {
       throw new UnauthorizedException('Device credentials are invalid');
     }
-    await this.prisma.device.update({ where: { id: device.id }, data: { lastSeenAt: new Date() } });
+    const validVersion = appVersion && /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(appVersion) ? appVersion : undefined;
+    await this.prisma.device.update({ where: { id: device.id }, data: { lastSeenAt: new Date(), ...(validVersion ? { appVersion: validVersion } : {}) } });
     return device;
   }
 }

@@ -8,11 +8,14 @@ coverage/
 .DS_Store
 .idea/
 .vscode/
+.vs/
 *.tsbuildinfo
 postgres-data/
 uploads/
 reports/
 backups/
+releases/
+*.dump
 certificates/
 *.key
 *.pem
@@ -20,4 +23,6 @@ certificates/
 TestResults/
 bin/
 obj/
+installers/**/artifacts/
+installers/**/staging/
 SugarERP_4Chat_Pack.zip

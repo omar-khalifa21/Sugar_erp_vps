@@ -58,6 +58,9 @@ export class EnrollmentService {
     if (!token || token.usedAt || token.expiresAt <= new Date() || !token.site.active) {
       throw new UnauthorizedException('Enrollment token is invalid or expired');
     }
+    if (input.expectedProfile && input.expectedProfile !== token.profile) {
+      throw new ConflictException('Enrollment token belongs to a different application profile');
+    }
     const credential = randomBytes(32).toString('base64url');
 
     try {

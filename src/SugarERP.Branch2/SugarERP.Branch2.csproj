@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net9.0</TargetFramework></PropertyGroup>
+  <ItemGroup><ProjectReference Include="..\SugarERP.Infrastructure.Local\SugarERP.Infrastructure.Local.csproj"/><ProjectReference Include="..\SugarERP.Sync.Client\SugarERP.Sync.Client.csproj"/></ItemGroup>
+</Project>

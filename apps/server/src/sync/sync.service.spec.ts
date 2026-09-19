@@ -3,6 +3,7 @@ import { DeviceProfile, SiteType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { DeviceAuthService } from './device-auth.service';
 import { SyncService } from './sync.service';
+import { TransferProjectionService } from './transfer-projection.service';
 
 describe('SyncService routing', () => {
   const siteId = '9cf1a57b-0e16-4e3b-b2f4-381ab3f5cff4';
@@ -13,6 +14,7 @@ describe('SyncService routing', () => {
     { syncEvent: { findMany } } as unknown as PrismaService,
     { authenticate } as unknown as DeviceAuthService,
     { getOrThrow: () => 'test-only-cursor-signing-key' } as unknown as ConfigService,
+    { apply: jest.fn() } as unknown as TransferProjectionService,
   );
 
   beforeEach(() => {
@@ -27,9 +29,17 @@ describe('SyncService routing', () => {
       expect.objectContaining({
         where: {
           OR: [
-            { siteId },
+            { siteId, deviceId: { not: deviceId } },
             {
               eventType: 'kitchen_request.submitted',
+              site: { type: { in: [SiteType.BRANCH_TYPE_1, SiteType.BRANCH_TYPE_2] } },
+            },
+            {
+              eventType: { in: ['incoming_receipt.accepted', 'incoming_receipt.disputed'] },
+              site: { type: { in: [SiteType.BRANCH_TYPE_1, SiteType.BRANCH_TYPE_2] } },
+            },
+            {
+              eventType: 'kitchen_return.dispatched',
               site: { type: { in: [SiteType.BRANCH_TYPE_1, SiteType.BRANCH_TYPE_2] } },
             },
           ],
@@ -46,7 +56,7 @@ describe('SyncService routing', () => {
       expect.objectContaining({
         where: {
           OR: [
-            { siteId },
+            { siteId, deviceId: { not: deviceId } },
             {
               eventType: 'shipment.dispatched',
               site: { type: SiteType.KITCHEN },

@@ -124,6 +124,19 @@ export interface KitchenOverview {
     unexplained_variance_scaled: string;
     cost_minor_per_scale: string | null;
   }>;
+  requests: Array<{ id: string; branch: { id: string; name: string }; status: string; submitted_at: string; line_count: number }>;
+  shipments: Array<{ id: string; reference: string; branch: { id: string; name: string }; status: string; dispatched_at: string; line_count: number; receipt_status: string | null }>;
+}
+
+export interface KitchenRecipe {
+  id: string;
+  productItemId: string;
+  outputScaled: string;
+  version: number;
+  active: boolean;
+  updatedAt: string;
+  product: Item;
+  components: Array<{ ingredientItemId: string; quantityScaled: string; ingredient: Item }>;
 }
 
 export interface QuantityConflict {
@@ -164,6 +177,7 @@ export interface User {
   username: string;
   displayName: string;
   active: boolean;
+  status: 'PENDING_PERMISSION' | 'ACTIVE' | 'DISABLED';
   createdAt: string;
   updatedAt: string;
   siteRoles: Array<{ role: Role; site: Site | null }>;
@@ -171,6 +185,8 @@ export interface User {
 
 export interface BranchOverview {
   site: Site;
+  inventory_history: Array<{ id: string; reference_id: string; kind: string; reason: string; user_name: string; occurred_at: string;
+    lines: Array<{ item_id: string; name_ar: string; unit: string; quantity_scale: number; location: 'FREEZER' | 'DISPLAY' | 'SALEABLE' | 'HOLD' | 'KITCHEN' | 'TRANSIT'; delta_scaled: string }> }>;
   freshness: { as_of: string | null; stale: boolean };
   stock: Array<{
     id: string;
@@ -230,12 +246,50 @@ async function request<T>(
   return body as T;
 }
 
+async function downloadInstaller(path: string, token: string, onProgress?: (percent: number) => void) {
+  const response = await fetch(`/api/v1${path}`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!response.ok) throw new ApiError(response.status, await response.json().catch(() => ({})));
+  const total = Number(response.headers.get('Content-Length'));
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('Download stream is unavailable');
+  const chunks: Uint8Array<ArrayBuffer>[] = [];
+  let received = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(new Uint8Array(value));
+    received += value.length;
+    onProgress?.(total ? Math.min(100, Math.floor(received * 100 / total)) : 0);
+  }
+  if (!received || (total && received !== total)) throw new Error('Incomplete installer download');
+  const url = URL.createObjectURL(new Blob(chunks, { type: 'application/octet-stream' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = response.headers.get('Content-Disposition')?.match(/filename="([^"]+)"/)?.[1] || 'Sugar-installer.exe';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
 export const api = {
   login: (username: string, password: string) =>
-    request<{ access_token: string; token_type: 'Bearer' }>('/auth/login', {
+    request<{ access_token: string; token_type: 'Bearer'; status: string }>('/auth/login', {
       method: 'POST',
       body: JSON.stringify({ username, password }),
     }),
+  signup: (input: { username: string; displayName: string; password: string }) =>
+    request<{ status: 'PENDING_PERMISSION' }>('/auth/signup', { method: 'POST', body: JSON.stringify(input) }),
+  branchOneRelease: (token: string) => request<{ version: string; filename: string; publishedAt: string; sha256: string; size: number; releaseNotes?: string }>('/releases/branch-type-1/current', {}, token),
+  branchOneTouchRelease: (token: string) => request<{ version: string; filename: string; publishedAt: string; sha256: string; size: number; releaseNotes?: string }>('/releases/branch-type-1/touch/current', {}, token),
+  kitchenRelease: (token: string) => request<{ version: string; filename: string; publishedAt: string; sha256: string; size: number; releaseNotes?: string }>('/releases/kitchen/current', {}, token),
+  branchTwoRelease: (token: string) => request<{ version: string; filename: string; publishedAt: string; sha256: string; size: number; releaseNotes?: string }>('/releases/branch-type-2/current', {}, token),
+  downloadBranchOne: (token: string, variant: 'desktop' | 'touch' = 'desktop', onProgress?: (percent: number) => void) =>
+    downloadInstaller(`/releases/branch-type-1${variant === 'touch' ? '/touch' : ''}/current/download`, token, onProgress),
+  downloadKitchen: (token: string, onProgress?: (percent: number) => void) =>
+    downloadInstaller('/releases/kitchen/current/download', token, onProgress),
+  downloadBranchTwo: (token: string, onProgress?: (percent: number) => void) =>
+    downloadInstaller('/releases/branch-type-2/current/download', token, onProgress),
   health: () => request<{ status: string; service: string }>('/health'),
   ready: () =>
     request<{ status: string; database: string; migrations: string }>('/ready'),
@@ -251,7 +305,7 @@ export const api = {
   archiveSite: (token: string, id: string) => request<Site>(`/sites/${id}`, { method: 'DELETE' }, token),
   createItem: (
     token: string,
-    input: Pick<Item, 'sku' | 'nameAr' | 'unit' | 'quantityScale' | 'retailPriceMinor' | 'kind'>,
+    input: Pick<Item, 'nameAr' | 'unit' | 'quantityScale' | 'retailPriceMinor' | 'kind'>,
   ) => request<Item>('/items', { method: 'POST', body: JSON.stringify(input) }, token),
   updateItem: (
     token: string,
@@ -292,6 +346,9 @@ export const api = {
   setCafePrice: (token: string, customerId: string, itemId: string, priceMinor: number) =>
     request(`/admin/cafe/customers/${customerId}/prices/${itemId}`, { method: 'PUT', body: JSON.stringify({ priceMinor }) }, token),
   kitchenOverview: (token: string) => request<KitchenOverview>('/admin/kitchen/overview', {}, token),
+  kitchenRecipes: (token: string) => request<KitchenRecipe[]>('/admin/kitchen/recipes', {}, token),
+  saveKitchenRecipe: (token: string, productId: string, input: { outputScaled: number; expectedVersion: number; components: Array<{ ingredientItemId: string; quantityScaled: number }> }) =>
+    request<KitchenRecipe>(`/admin/kitchen/recipes/${productId}`, { method: 'PUT', body: JSON.stringify(input) }, token),
   conflicts: (token: string) => request<QuantityConflict[]>('/admin/conflicts', {}, token),
   decideConflict: (token: string, id: string, input: { expectedVersion: number; reason: string; lines: Array<{ lineId: string; finalScaled: string }> }) =>
     request(`/admin/conflicts/${id}/decision`, { method: 'POST', body: JSON.stringify(input) }, token),
@@ -309,5 +366,8 @@ export function friendlyError(error: unknown): string {
     CONFLICT_ALREADY_DECIDED: 'اتُخذ قرار لهذا التعارض بالفعل.',
     INTERNAL_ERROR: 'حدث عطل مؤقت. لم نفقد أي بيانات، حاول مرة أخرى.',
   };
+  if (error.body.code === 'VALIDATION_ERROR' && error.body.field_errors?.length) {
+    return error.body.field_errors.map((field) => field.includes('password') ? 'كلمة المرور الجديدة يجب أن تكون ١٢ حرفاً على الأقل. منح الصلاحيات لا يحتاج تغيير كلمة المرور.' : field).join(' ');
+  }
   return messages[error.body.code || ''] || (error.status >= 500 ? messages.INTERNAL_ERROR : 'تعذر إكمال الإجراء. راجع البيانات وحاول مرة أخرى.');
 }

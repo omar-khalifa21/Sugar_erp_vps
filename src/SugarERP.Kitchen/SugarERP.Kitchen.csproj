@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net9.0</TargetFramework></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\SugarERP.Application\SugarERP.Application.csproj" />
+    <ProjectReference Include="..\SugarERP.Infrastructure.Local\SugarERP.Infrastructure.Local.csproj" />
+    <ProjectReference Include="..\SugarERP.Sync.Client\SugarERP.Sync.Client.csproj" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" />
+    <PackageReference Include="DocumentFormat.OpenXml" />
+  </ItemGroup>
+</Project>

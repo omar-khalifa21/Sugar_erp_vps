@@ -13,6 +13,8 @@ coverage
 SugarERP_4Chat_Pack.zip
 reports
 backups
+releases
+*.dump
 certificates
 *.key
 *.pem

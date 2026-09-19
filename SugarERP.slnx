@@ -1,0 +1,19 @@
+<Solution>
+  <Folder Name="/apps/">
+    <Project Path="apps/branch-type-1/SugarERP.Branch1.csproj" />
+    <Project Path="apps/kitchen/SugarERP.Kitchen.csproj" />
+    <Project Path="apps/branch-type-2/SugarERP.Branch2.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/SugarERP.Application/SugarERP.Application.csproj" />
+    <Project Path="src/SugarERP.Desktop.Shared/SugarERP.Desktop.Shared.csproj" />
+    <Project Path="src/SugarERP.Domain/SugarERP.Domain.csproj" />
+    <Project Path="src/SugarERP.Infrastructure.Local/SugarERP.Infrastructure.Local.csproj" />
+    <Project Path="src/SugarERP.Sync.Client/SugarERP.Sync.Client.csproj" />
+    <Project Path="src/SugarERP.Kitchen/SugarERP.Kitchen.csproj" />
+    <Project Path="src/SugarERP.Branch2/SugarERP.Branch2.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/SugarERP.Branch1.Tests/SugarERP.Branch1.Tests.csproj" />
+  </Folder>
+</Solution>

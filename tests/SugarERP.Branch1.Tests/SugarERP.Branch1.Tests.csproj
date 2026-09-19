@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="Avalonia.Headless" ExcludeAssets="analyzers" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="coverlet.collector">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\SugarERP.Application\SugarERP.Application.csproj" />
+    <ProjectReference Include="..\..\src\SugarERP.Domain\SugarERP.Domain.csproj" />
+    <ProjectReference Include="..\..\src\SugarERP.Desktop.Shared\SugarERP.Desktop.Shared.csproj" />
+    <ProjectReference Include="..\..\src\SugarERP.Infrastructure.Local\SugarERP.Infrastructure.Local.csproj" />
+    <ProjectReference Include="..\..\src\SugarERP.Sync.Client\SugarERP.Sync.Client.csproj" />
+    <ProjectReference Include="..\..\src\SugarERP.Kitchen\SugarERP.Kitchen.csproj" />
+    <ProjectReference Include="..\..\apps\branch-type-1\SugarERP.Branch1.csproj" />
+  </ItemGroup>
+  <Target Name="RemoveIncompatibleAvaloniaAnalyzers" BeforeTargets="CoreCompile">
+    <ItemGroup>
+      <Analyzer Remove="@(Analyzer)" Condition="$([System.String]::Copy('%(Analyzer.FileName)').StartsWith('Avalonia.'))" />
+    </ItemGroup>
+  </Target>
+</Project>
