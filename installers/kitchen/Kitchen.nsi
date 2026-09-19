@@ -18,7 +18,7 @@ RequestExecutionLevel user
 Icon "..\..\apps\kitchen\Assets\sugar.ico"
 VIProductVersion "${APP_VERSION}.0"
 VIAddVersionKey "ProductName" "Sugar ERP Kitchen"
-VIAddVersionKey "FileDescription" "Sugar ERP Kitchen desktop installer"
+VIAddVersionKey "FileDescription" "Sugar ERP Kitchen desktop PC installer"
 VIAddVersionKey "CompanyName" "Sugar"
 VIAddVersionKey "LegalCopyright" "Copyright (c) Sugar"
 VIAddVersionKey "FileVersion" "${APP_VERSION}"
