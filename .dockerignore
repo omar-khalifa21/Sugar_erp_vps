@@ -20,6 +20,8 @@ SugarERP_4Chat_Pack.zip
 reports
 backups
 releases
+installers/**/artifacts
+installers/**/staging
 *.dump
 certificates
 *.key
