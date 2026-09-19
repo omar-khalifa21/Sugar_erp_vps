@@ -6,7 +6,7 @@ SetCompressor /SOLID zlib
 !ifndef SHARED_INCLUDE_DIR
   !define SHARED_INCLUDE_DIR "${__FILEDIR__}\..\shared"
 !endif
-!include "${SHARED_INCLUDE_DIR}/LocalSettings.nsh"
+!include "${SHARED_INCLUDE_DIR}\LocalSettings.nsh"
 !ifndef PUBLISH_DIR
   !error "PUBLISH_DIR required"
 !endif
