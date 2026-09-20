@@ -13,14 +13,16 @@ public sealed class KitchenDailyReportWriter(KitchenStore store)
     public async Task<KitchenReportResult> WriteLatestCountAsync(string directory)
     {
         await using var db = store.Open();
-        var latest = await db.IngredientMovements.AsNoTracking().Where(x => x.Kind == "COUNT").OrderByDescending(x => x.OccurredAtUtc).FirstOrDefaultAsync()
+        var latest = (await db.IngredientMovements.AsNoTracking().Where(x => x.Kind == "COUNT").ToListAsync())
+            .OrderByDescending(x => x.OccurredAtUtc).FirstOrDefault()
             ?? throw new InvalidOperationException("لا يوجد جرد مكتمل لإنشاء التقرير.");
         var countId = latest.ShipmentId;
         var counts = await db.IngredientMovements.AsNoTracking().Where(x => x.Kind == "COUNT" && x.ShipmentId == countId).ToListAsync();
         var itemIds = counts.Select(x => x.IngredientItemId).ToArray();
         var balances = await db.Ingredients.AsNoTracking().Where(x => itemIds.Contains(x.ItemId)).ToDictionaryAsync(x => x.ItemId);
         var start = latest.OccurredAtUtc.Date;
-        var movements = await db.IngredientMovements.AsNoTracking().Where(x => x.OccurredAtUtc >= start && x.OccurredAtUtc <= latest.OccurredAtUtc).OrderBy(x => x.OccurredAtUtc).ToListAsync();
+        var movements = (await db.IngredientMovements.AsNoTracking().Where(x => x.OccurredAtUtc >= start && x.OccurredAtUtc <= latest.OccurredAtUtc).ToListAsync())
+            .OrderBy(x => x.OccurredAtUtc).ToList();
         Directory.CreateDirectory(directory);
         var path = Path.Combine(directory, $"kitchen-{latest.OccurredAtUtc:yyyy-MM-dd}-{countId.ToString("N")[..8]}.xlsx");
         if (!File.Exists(path)) Build(path, latest.OccurredAtUtc, countId, counts, balances, movements);

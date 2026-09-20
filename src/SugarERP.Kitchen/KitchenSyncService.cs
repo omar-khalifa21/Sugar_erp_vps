@@ -190,7 +190,7 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
         {
             await using var db = store.Open(); await using var transaction = await db.Database.BeginTransactionAsync();
             var configuration = await db.Configuration.SingleAsync();
-            var customer = await db.CafeCustomers.AsNoTracking().SingleOrDefaultAsync(x => x.Id == customerId && x.Active)
+            var customer = await db.CafeCustomers.AsNoTracking().SingleOrDefaultAsync(x => x.Id == customerId && x.Active && !x.HiddenLocally)
                 ?? throw new BusinessRuleException("CAFE_NOT_FOUND", "العميل غير موجود. نفّذ المزامنة أولاً.");
             var itemIds = selected.Select(x => x.Key).ToArray();
             var prices = await db.CafePrices.AsNoTracking().Include(x => x.Item).Where(x => x.CustomerId == customerId && itemIds.Contains(x.ItemId)).ToDictionaryAsync(x => x.ItemId);
@@ -226,7 +226,24 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
     public async Task<IReadOnlyList<CustomOrderSnapshot>> GetCustomOrdersAsync()
     {
         await using var db = store.Open();
-        return (await db.CustomOrders.AsNoTracking().Include(x => x.Lines).OrderByDescending(x => x.CreatedAtUtc).ToListAsync()).Select(ToSnapshot).ToArray();
+        var orders = await db.CustomOrders.AsNoTracking().Include(x => x.Lines).ToListAsync();
+        return orders.OrderByDescending(x => x.CreatedAtUtc).Select(ToSnapshot).ToArray();
+    }
+
+    public async Task HideCafeCustomerAsync(Guid customerId)
+    {
+        if (customerId == Guid.Empty) throw new BusinessRuleException("CAFE_REQUIRED", "اختر الكافيه أولاً.");
+        await store.WriteLock.WaitAsync();
+        try
+        {
+            await using var db = store.Open();
+            var customer = await db.CafeCustomers.SingleOrDefaultAsync(x => x.Id == customerId)
+                ?? throw new BusinessRuleException("CAFE_NOT_FOUND", "الكافيه غير موجود.");
+            customer.HiddenLocally = true;
+            customer.Active = false;
+            await db.SaveChangesAsync();
+        }
+        finally { store.WriteLock.Release(); }
     }
 
     public async Task PrintCustomOrderAsync(Guid orderId, string printerName)

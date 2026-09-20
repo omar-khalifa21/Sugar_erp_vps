@@ -19,7 +19,7 @@ public sealed class KitchenConfiguration
 }
 
 public sealed class KitchenProduct { public Guid Id { get; set; } public string Name { get; set; } = ""; public string Unit { get; set; } = ""; public int QuantityScale { get; set; } = 1; public bool Active { get; set; } = true; }
-public sealed class KitchenCafeCustomer { public Guid Id { get; set; } public string Name { get; set; } = ""; public string Contact { get; set; } = ""; public string Notes { get; set; } = ""; public bool Active { get; set; } = true; public List<KitchenCafePrice> Prices { get; set; } = []; }
+public sealed class KitchenCafeCustomer { public Guid Id { get; set; } public string Name { get; set; } = ""; public string Contact { get; set; } = ""; public string Notes { get; set; } = ""; public bool Active { get; set; } = true; public bool HiddenLocally { get; set; } public List<KitchenCafePrice> Prices { get; set; } = []; }
 public sealed class KitchenCafePrice { public Guid CustomerId { get; set; } public Guid ItemId { get; set; } public long UnitPriceMinor { get; set; } public int Version { get; set; } public KitchenCafeCustomer Customer { get; set; } = null!; public KitchenProduct Item { get; set; } = null!; }
 public sealed class KitchenCustomOrder
 {
@@ -184,6 +184,7 @@ public sealed class KitchenStore
         await AddColumnAsync(db, "ALTER TABLE configuration ADD COLUMN PrinterName TEXT NOT NULL DEFAULT ''");
         await AddColumnAsync(db, "ALTER TABLE configuration ADD COLUMN NextCustomOrderSequence INTEGER NOT NULL DEFAULT 1");
         await AddColumnAsync(db, "ALTER TABLE outbox ADD COLUMN AppliedLocally INTEGER NOT NULL DEFAULT 0");
+        await AddColumnAsync(db, "ALTER TABLE cafe_customers ADD COLUMN HiddenLocally INTEGER NOT NULL DEFAULT 0");
         var configuration = await db.Configuration.SingleOrDefaultAsync();
         var highestSequence = await db.Outbox.Select(x => (int?)x.Sequence).MaxAsync() ?? 0;
         if (configuration is not null && configuration.NextDeviceSequence <= highestSequence)

@@ -5,6 +5,7 @@ using SugarERP.Kitchen;
 using SugarERP.Infrastructure.Local;
 using Avalonia.Platform.Storage;
 using SugarERP.Application;
+using SugarERP.Domain;
 using System.Globalization;
 using System.Runtime.Versioning;
 using SugarERP.Desktop.Shared;
@@ -18,6 +19,7 @@ public sealed partial class MainWindow : Window
     private readonly HttpClient _updateHttp = new() { Timeout = TimeSpan.FromMinutes(10) };
     private readonly DeploymentConfiguration _deployment = DeploymentConfiguration.Create(DesktopApplicationType.Kitchen);
     private DesktopReleaseManifest? _availableUpdate;
+    private RecipeRow[] _recipeRows = [];
     private readonly ReportDirectorySettings _reports = new("Kitchen");
     private Button SyncButton => this.FindControl<Button>("SyncButton")!;
     private TextBlock StatusText => this.FindControl<TextBlock>("StatusText")!;
@@ -32,14 +34,74 @@ public sealed partial class MainWindow : Window
     private async Task RefreshAsync()
     {
         await using var db = _store.Open();
-        RequestsList.ItemsSource = (await db.Requests.AsNoTracking().Include(x => x.Lines).ToListAsync()).OrderByDescending(x => x.SubmittedAtUtc).ToArray();
+        var requests = (await db.Requests.AsNoTracking().Include(x => x.Lines).ToListAsync()).OrderByDescending(x => x.SubmittedAtUtc).ToArray();
+        var activeRequests = requests.Where(x => x.Status is not ("FULFILLED" or "REJECTED")).ToArray();
+        RequestsList.ItemsSource = requests;
         this.FindControl<DataGrid>("ReceiptsGrid")!.ItemsSource = (await db.Receipts.AsNoTracking().ToListAsync()).OrderByDescending(x => x.CountedAtUtc).ToArray();
         this.FindControl<DataGrid>("ReturnsGrid")!.ItemsSource = (await db.Returns.AsNoTracking().ToListAsync()).OrderByDescending(x => x.DispatchedAtUtc).ToArray();
-        this.FindControl<DataGrid>("InventoryGrid")!.ItemsSource = (await db.Ingredients.AsNoTracking().OrderBy(x => x.Name).ToListAsync()).Select(x => new IngredientEntry(x)).ToList();
-        this.FindControl<ComboBox>("CafeCustomer")!.ItemsSource = (await db.CafeCustomers.AsNoTracking().Where(x => x.Active).OrderBy(x => x.Name).ToListAsync()).Select(x => new CafeCustomerOption(x.Id, x.Name)).ToArray();
-        this.FindControl<DataGrid>("CustomOrdersGrid")!.ItemsSource = (await _sync.GetCustomOrdersAsync()).Select(x => new KitchenOrderRow(x)).ToArray();
+        var ingredients = await db.Ingredients.AsNoTracking().OrderBy(x => x.Name).ToListAsync();
+        var ingredientsById = ingredients.ToDictionary(x => x.ItemId);
+        var recipes = await db.Recipes.AsNoTracking().Include(x => x.Components).ToListAsync();
+        var recipesByProduct = recipes.ToDictionary(x => x.ProductItemId);
+        var products = await db.Products.AsNoTracking().ToDictionaryAsync(x => x.Id);
+        var committed = new Dictionary<Guid, long>();
+        foreach (var line in activeRequests.SelectMany(x => x.Lines))
+        {
+            var remaining = Math.Max(0, line.RequestedScaled - line.SentScaled);
+            if (remaining == 0 || !recipesByProduct.TryGetValue(line.ItemId, out var recipe) || recipe.OutputScaled <= 0) continue;
+            foreach (var component in recipe.Components)
+            {
+                var required = checked((long)decimal.Ceiling((decimal)remaining * component.QuantityScaled / recipe.OutputScaled));
+                committed[component.IngredientItemId] = checked(committed.GetValueOrDefault(component.IngredientItemId) + required);
+            }
+        }
+        var inventoryRows = ingredients.Select(x => new IngredientEntry(x, checked(x.QuantityScaled - committed.GetValueOrDefault(x.ItemId)))).ToList();
+        this.FindControl<DataGrid>("InventoryGrid")!.ItemsSource = inventoryRows;
+        _recipeRows = recipes.OrderBy(x => products.GetValueOrDefault(x.ProductItemId)?.Name ?? x.ProductItemId.ToString()).Select(recipe =>
+        {
+            var product = products.GetValueOrDefault(recipe.ProductItemId);
+            var productScale = product?.QuantityScale is > 0 ? product.QuantityScale : 1;
+            var components = recipe.Components.Select(component =>
+            {
+                var ingredient = ingredientsById.GetValueOrDefault(component.IngredientItemId);
+                var scale = ingredient?.QuantityScale is > 0 ? ingredient.QuantityScale : 1;
+                return $"{ingredient?.Name ?? component.IngredientItemId.ToString()} {(decimal)component.QuantityScaled / scale:0.###} {ingredient?.Unit ?? ""}".Trim();
+            });
+            return new RecipeRow
+            {
+                ProductName = product?.Name ?? recipe.ProductItemId.ToString(),
+                OutputDisplay = $"{(decimal)recipe.OutputScaled / productScale:0.###} {product?.Unit ?? ""}".Trim(),
+                ComponentsDisplay = string.Join("، ", components),
+                Version = recipe.Version
+            };
+        }).ToArray();
+        RecipeSearch_Changed(null, null!);
+        this.FindControl<ComboBox>("CafeCustomer")!.ItemsSource = (await db.CafeCustomers.AsNoTracking().Where(x => x.Active && !x.HiddenLocally).OrderBy(x => x.Name).ToListAsync()).Select(x => new CafeCustomerOption(x.Id, x.Name)).ToArray();
+        var customOrders = await _sync.GetCustomOrdersAsync();
+        this.FindControl<DataGrid>("CustomOrdersGrid")!.ItemsSource = customOrders.Select(x => new KitchenOrderRow(x)).ToArray();
         var configuration = await db.Configuration.AsNoTracking().SingleOrDefaultAsync();
         if (configuration is not null && !string.IsNullOrWhiteSpace(configuration.PrinterName)) this.FindControl<ComboBox>("PrinterName")!.SelectedItem = configuration.PrinterName;
+        var pendingSync = await db.Outbox.AsNoTracking().CountAsync(x => !x.Acknowledged);
+        this.FindControl<TextBlock>("PendingSyncCount")!.Text = pendingSync.ToString(CultureInfo.CurrentCulture);
+        this.FindControl<TextBlock>("IngredientCount")!.Text = ingredients.Count.ToString(CultureInfo.CurrentCulture);
+        this.FindControl<TextBlock>("PendingRequestCount")!.Text = activeRequests.Length.ToString(CultureInfo.CurrentCulture);
+        this.FindControl<TextBlock>("HomeLowStock")!.Text = $"{inventoryRows.Count(x => x.ExpectedScaled <= 0)} خامات تحتاج مراجعة";
+        this.FindControl<TextBlock>("HomeRecipes")!.Text = $"{_recipeRows.Length} وصفة منشورة";
+        this.FindControl<TextBlock>("HomeRequests")!.Text = $"{activeRequests.Length} طلب قيد التنفيذ";
+        this.FindControl<TextBlock>("HomeOrders")!.Text = $"{customOrders.Count(x => x.Status is not (CustomOrderStatus.Delivered or CustomOrderStatus.Cancelled))} طلب مفتوح";
+        this.FindControl<TextBlock>("ServerStatusText")!.Text = configuration is null ? "الجهاز غير مربوط بالخادم" : $"مرتبط بـ {configuration.SiteName}";
+        this.FindControl<TextBlock>("SyncStateText")!.Text = pendingSync == 0 ? "متزامن" : $"{pendingSync} بانتظار الإرسال";
+    }
+    private void Home_Click(object? sender, RoutedEventArgs e) => this.FindControl<TabControl>("MainTabs")!.SelectedIndex = 0;
+    private void OpenRequests_Click(object? sender, RoutedEventArgs e) => this.FindControl<TabControl>("MainTabs")!.SelectedIndex = 1;
+    private void OpenStock_Click(object? sender, RoutedEventArgs e) => this.FindControl<TabControl>("MainTabs")!.SelectedIndex = 4;
+    private void OpenRecipes_Click(object? sender, RoutedEventArgs e) => this.FindControl<TabControl>("MainTabs")!.SelectedIndex = 5;
+    private void OpenOrders_Click(object? sender, RoutedEventArgs e) => this.FindControl<TabControl>("MainTabs")!.SelectedIndex = 6;
+    private void OpenSettings_Click(object? sender, RoutedEventArgs e) => this.FindControl<TabControl>("MainTabs")!.SelectedIndex = 7;
+    private void RecipeSearch_Changed(object? sender, TextChangedEventArgs e)
+    {
+        var search = this.FindControl<TextBox>("RecipeSearch")?.Text?.Trim() ?? "";
+        this.FindControl<DataGrid>("RecipesGrid")!.ItemsSource = _recipeRows.Where(x => search.Length == 0 || x.ProductName.Contains(search, StringComparison.CurrentCultureIgnoreCase)).ToArray();
     }
     private async void Enroll_Click(object? sender, RoutedEventArgs e) { await Run(async () => { await _sync.EnrollAsync(new Uri(ApiUrl.Text!.Trim()), EnrollmentToken.Text!.Trim(), DeviceName.Text!.Trim()); EnrollmentToken.Text = ""; return "تم ربط جهاز المطبخ."; }); }
     private async void Sync_Click(object? sender, RoutedEventArgs e) { await Run(async () => $"اكتملت المزامنة؛ تم تطبيق {await _sync.PullAsync()} تحديث."); await RefreshAsync(); }
@@ -133,6 +195,15 @@ public sealed partial class MainWindow : Window
         this.FindControl<DataGrid>("CafeItemsGrid")!.ItemsSource = prices.Select(x => new CafeItemEntry(x)).ToList();
         this.FindControl<TextBox>("CustomDue")!.Text = DateTime.Now.AddDays(1).ToString("yyyy-MM-dd 12:00", CultureInfo.InvariantCulture);
     }
+    private async void DeleteCafeCustomer_Click(object? sender, RoutedEventArgs e)
+    {
+        var selector = this.FindControl<ComboBox>("CafeCustomer")!;
+        if (selector.SelectedItem is not CafeCustomerOption customer) { StatusText.Text = "اختر الكافيه أولاً."; return; }
+        if (!await ConfirmAsync("حذف الكافيه", $"سيتم إخفاء {customer.Name} من الطلبات الجديدة مع الاحتفاظ بكل فواتيره السابقة. هل تريد المتابعة؟")) return;
+        await Run(async () => { await _sync.HideCafeCustomerAsync(customer.Id); return $"تم حذف {customer.Name} من قائمة الكافيهات، والفواتير السابقة محفوظة."; });
+        this.FindControl<DataGrid>("CafeItemsGrid")!.ItemsSource = null;
+        await RefreshAsync();
+    }
     private async void CreateCustomOrder_Click(object? sender, RoutedEventArgs e)
     {
         if (this.FindControl<ComboBox>("CafeCustomer")!.SelectedItem is not CafeCustomerOption customer) { StatusText.Text = "اختر العميل أولاً."; return; }
@@ -166,9 +237,16 @@ public sealed partial class MainWindow : Window
 }
 public sealed class IngredientEntry
 {
-    private readonly KitchenIngredientBalance _item; public IngredientEntry(KitchenIngredientBalance item) { _item = item; }
-    public Guid ItemId => _item.ItemId; public string Name => _item.Name; public string CurrentDisplay => $"{(decimal)_item.QuantityScaled / _item.QuantityScale:0.###} {_item.Unit}"; public string InputDisplay { get; set; } = "";
+    private readonly KitchenIngredientBalance _item; public IngredientEntry(KitchenIngredientBalance item, long expectedScaled) { _item = item; ExpectedScaled = expectedScaled; }
+    public Guid ItemId => _item.ItemId; public string Name => _item.Name; public long ExpectedScaled { get; } public string CurrentDisplay => $"{(decimal)_item.QuantityScaled / _item.QuantityScale:0.###} {_item.Unit}"; public string ExpectedDisplay => $"{(decimal)ExpectedScaled / _item.QuantityScale:0.###} {_item.Unit}"; public string StockStatus => ExpectedScaled < 0 ? "عجز" : ExpectedScaled == 0 ? "ينفد" : "متاح"; public string InputDisplay { get; set; } = "";
     public long InputScaled => decimal.TryParse(InputDisplay, out var value) && value >= 0 && decimal.Truncate(value * _item.QuantityScale) == value * _item.QuantityScale ? checked((long)(value * _item.QuantityScale)) : throw new InvalidOperationException($"كمية {_item.Name} غير صالحة.");
+}
+public sealed class RecipeRow
+{
+    public string ProductName { get; init; } = "";
+    public string OutputDisplay { get; init; } = "";
+    public string ComponentsDisplay { get; init; } = "";
+    public int Version { get; init; }
 }
 public sealed class DispatchLine
 {
