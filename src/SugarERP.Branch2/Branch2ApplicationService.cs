@@ -109,6 +109,14 @@ public sealed class Branch2ApplicationService(LocalDatabase database, HttpClient
                     existing.UnitPriceMinor = price.GetProperty("priceMinor").GetInt64(); existing.UpdatedAtUtc = DateTimeOffset.UtcNow;
                 }
             }
+            var serverCustomerIds = body.RootElement.GetProperty("customers").EnumerateArray()
+                .Select(x => x.GetProperty("id").GetGuid()).ToHashSet();
+            var pendingCustomerIds = await db.OutboxMessages
+                .Where(x => x.State != OutboxState.Acknowledged && x.EventType.StartsWith("cafe_customer."))
+                .Select(x => x.AggregateId).ToListAsync();
+            foreach (var missing in await db.CafeCustomers
+                .Where(x => x.Active && !serverCustomerIds.Contains(x.Id) && !pendingCustomerIds.Contains(x.Id)).ToListAsync())
+                missing.Active = false;
             await db.SaveChangesAsync(); await transaction.CommitAsync();
         }
         finally { database.WriteLock.Release(); }
@@ -178,6 +186,10 @@ public sealed class Branch2ApplicationService(LocalDatabase database, HttpClient
     public Task<CustomOrderSnapshot> CollectCafePaymentAsync(Guid commandId, Guid orderId, int version, long amount, PaymentMethod method)
     {
         RequireSession(); return new BranchModuleOperationsService(database).AddCustomOrderPaymentAsync(new(commandId, orderId, version, amount, method));
+    }
+    public Task ArchiveCafeAsync(Guid commandId, Guid cafeId, int version)
+    {
+        RequireSession(); return new BranchModuleOperationsService(database).ArchiveCafeProfileAsync(commandId, cafeId, version);
     }
     public Task<CustomOrderSnapshot> CancelCafeOrderAsync(Guid commandId, Guid orderId, int version)
     {

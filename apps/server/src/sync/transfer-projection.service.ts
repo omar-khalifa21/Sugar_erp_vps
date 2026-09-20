@@ -67,14 +67,15 @@ export class TransferProjectionService {
       case 'catalog.item.updated': return this.catalogItem(tx, event, siteId, profile);
       case 'catalog.item.deleted': return this.archiveCatalogItem(tx, event, siteId, profile);
       case 'cafe_customer.created': return this.cafeCustomer(tx, event, siteId);
+      case 'cafe_customer.archived': return this.archiveCafeCustomer(tx, event, siteId, profile);
       case 'cafe_customer.price_list_updated': return this.cafePriceList(tx, event, siteId, profile);
       case 'branch2.inventory.posted': return this.inventory(tx, event, siteId, profile);
       case 'sale.completed': return this.sale(tx, event, siteId, profile);
       case 'sale.corrected': return this.saleCorrection(tx, event, siteId, profile);
       case 'kitchen_return.dispatched': return this.kitchenReturn(tx, event, siteId, profile);
-      case 'custom_order.created': return this.cafeOrder(tx, event, siteId, profile);
-      case 'custom_customer.payment_recorded': return this.cafePayment(tx, event, siteId, profile);
-      case 'custom_order.status_changed': return this.cafeStatus(tx, event, siteId, profile);
+      case 'custom_order.created': return this.cafeOrder(tx, event, siteId);
+      case 'custom_customer.payment_recorded': return this.cafePayment(tx, event, siteId);
+      case 'custom_order.status_changed': return this.cafeStatus(tx, event, siteId);
       default: return;
     }
   }
@@ -169,8 +170,7 @@ export class TransferProjectionService {
         update: { quantityScaled: actual, version: { increment: 1 }, asOfAt: new Date(event.occurred_at), sourceEventId: event.id } });
     }
   }
-  private async cafeOrder(tx: Client, event: SyncEventDto, siteId: string, profile: DeviceProfile) {
-    if (profile === DeviceProfile.KITCHEN) error('WRONG_PROFILE', 'A kitchen cannot post branch custom orders', 403);
+  private async cafeOrder(tx: Client, event: SyncEventDto, siteId: string) {
     const p = object(event.payload), customerId = id(p.customer_id);
     if (id(p.site_id) !== siteId) error('WRONG_SITE', 'Cafe order belongs to another site', 403);
     const customer = await tx.cafeCustomer.findUnique({ where: { id: customerId } });
@@ -193,8 +193,7 @@ export class TransferProjectionService {
       businessDate: new Date(event.occurred_at.slice(0, 10)), netMinor: total, occurredAt: new Date(event.occurred_at), sourceEventId: event.id,
       lines: { create: details } } });
   }
-  private async cafePayment(tx: Client, event: SyncEventDto, siteId: string, profile: DeviceProfile) {
-    if (profile === DeviceProfile.KITCHEN) error('WRONG_PROFILE', 'A kitchen cannot collect branch custom-order payments', 403);
+  private async cafePayment(tx: Client, event: SyncEventDto, siteId: string) {
     const p = object(event.payload), customerId = id(p.customer_id), invoiceId = id(p.source_custom_order_id);
     if (!['CASH', 'VISA'].includes(String(p.payment_method))) error('INVALID_PAYMENT', 'Cafe payment method is invalid');
     if (id(p.site_id) !== siteId) error('WRONG_SITE', 'Cafe payment belongs to another site', 403);
@@ -215,8 +214,7 @@ export class TransferProjectionService {
     await tx.cafePayment.create({ data: { id: id(p.payment_id), customerId, collectedAtSiteId: siteId, reference: `P-${id(p.payment_id)}`,
       amountMinor: amount, occurredAt: new Date(event.occurred_at), sourceEventId: event.id, allocations: { create: allocations } } });
   }
-  private async cafeStatus(tx: Client, event: SyncEventDto, siteId: string, profile: DeviceProfile) {
-    if (profile === DeviceProfile.KITCHEN) error('WRONG_PROFILE', 'A kitchen cannot manage branch custom orders', 403);
+  private async cafeStatus(tx: Client, event: SyncEventDto, siteId: string) {
     const p = object(event.payload), invoiceId = id(p.custom_order_id);
     if (!['CONFIRMED', 'READY', 'DELIVERED', 'CANCELLED'].includes(String(p.status)))
       error('INVALID_CAFE', 'Custom-order status transition is invalid');
@@ -502,6 +500,16 @@ export class TransferProjectionService {
         version: Number(payload.version) || 1,
       })) },
     } });
+  }
+
+  private async archiveCafeCustomer(tx: Client, event: SyncEventDto, siteId: string, profile: DeviceProfile) {
+    if (profile !== DeviceProfile.BRANCH_TYPE_2) error('WRONG_PROFILE', 'Only Branch Type 2 can archive its cafe customers', 403);
+    const payload = object(event.payload), customerId = id(payload.customer_id);
+    if (id(payload.site_id) !== siteId) error('WRONG_SITE', 'Cafe customer origin does not match the authenticated site', 403);
+    const customer = await tx.cafeCustomer.findUnique({ where: { id: customerId } });
+    if (!customer) error('DEPENDENCY_NOT_READY', 'Cafe customer has not reached the server', 409);
+    if (customer.originSiteId !== siteId) error('WRONG_SITE', 'Only the owning site can archive this cafe customer', 403);
+    await tx.cafeCustomer.update({ where: { id: customerId }, data: { active: false } });
   }
 
   private async cafePriceList(tx: Client, event: SyncEventDto, siteId: string, profile: DeviceProfile) {

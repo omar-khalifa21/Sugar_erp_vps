@@ -116,6 +116,13 @@ public sealed partial class MainWindow : Window
         var order = await _service.CreateCafeOrderAsync(new(Guid.NewGuid(), cafe.Profile.Id, Control<TextBox>("Reason").Text ?? "Cafe order", DateTimeOffset.UtcNow.AddDays(1), [new CafeOrderLineInput(item.ItemId, quantity)]));
         await Refresh(); Control<TextBlock>("Status").Text = $"تم حفظ الطلب {order.OrderNumber} محلياً؛ بانتظار المزامنة. لم يخصم المخزون حتى التسليم.";
     });
+    private async void CafeArchive_Click(object? sender, RoutedEventArgs e) => await Run(async () =>
+    {
+        var cafe = Control<ComboBox>("Cafes").SelectedItem as CafeChoice ?? throw new BusinessRuleException("CUSTOMER_REQUIRED", "اختر الكافيه.");
+        if (!await Confirm($"حذف {cafe.Profile.Name} من الحسابات الجديدة؟ ستظل الطلبات والمدفوعات السابقة محفوظة.")) return;
+        await _service.ArchiveCafeAsync(Guid.NewGuid(), cafe.Profile.Id, cafe.Profile.Version);
+        await Refresh(); Control<TextBlock>("Status").Text = "تم حذف الكافيه محلياً؛ ستصل الأرشفة إلى الخادم وباقي الأجهزة عبر المزامنة.";
+    });
     private async void CafeDeliver_Click(object? sender, RoutedEventArgs e) => await Run(async () =>
     {
         var order = Control<DataGrid>("CafeOrders").SelectedItem as CustomOrderSnapshot ?? throw new BusinessRuleException("ORDER_REQUIRED", "اختر الطلب.");

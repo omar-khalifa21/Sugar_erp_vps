@@ -364,9 +364,34 @@ public sealed class BranchModuleOperationsServiceTests
         var payment = Assert.Single(await db.CustomOrderPayments.ToListAsync());
         Assert.Null(payment.ShiftId);
         Assert.Equal(3, await db.CustomOrderActivities.CountAsync(value => value.CustomOrderId == created.Id));
-        Assert.Equal(3, await db.OutboxMessages.CountAsync(value => value.AggregateId == created.Id));
+        Assert.Equal(4, await db.OutboxMessages.CountAsync(value => value.AggregateId == created.Id));
         Assert.Empty(await db.CashMovements.Where(value => value.Kind.StartsWith("CUSTOM_ORDER")).ToListAsync());
         Assert.Equal(2, await db.SideEffectJobs.CountAsync(value => value.SourceId == created.Id && value.Kind == SideEffectKind.PrintCustomOrder));
+    }
+
+    [Fact]
+    public async Task CloseShift_WithNoCatalogItems_ClosesAndQueuesEmptyReport()
+    {
+        await using var store = await ModuleTestStore.CreateAsync();
+        await using (var db = store.Database.CreateContext())
+        {
+            foreach (var item in await db.CatalogItems.ToListAsync()) item.Active = false;
+            foreach (var balance in await db.StockBalances.ToListAsync()) balance.QuantityScaled = 0;
+            await db.SaveChangesAsync();
+        }
+
+        var shift = await store.Operations.OpenShiftAsync(ShiftKind.Morning, 2_500);
+        var preview = await store.Modules.GetClosingPreviewAsync();
+
+        Assert.Empty(preview.Items);
+        var closed = await store.Modules.CloseShiftAsync(new CloseShiftCommand(Guid.NewGuid(), [], 2_500));
+
+        Assert.Empty(closed.Report.Items);
+        await using var verify = store.Database.CreateContext();
+        Assert.Equal(ShiftStatus.Closed, (await verify.Shifts.SingleAsync(value => value.Id == shift.Id)).Status);
+        Assert.Empty(await verify.StockCountLines.ToListAsync());
+        Assert.Single(await verify.OutboxMessages.Where(value => value.EventType == "shift.closed").ToListAsync());
+        Assert.Equal(3, await verify.SideEffectJobs.CountAsync(value => value.SourceId == shift.Id));
     }
 
     [Fact]

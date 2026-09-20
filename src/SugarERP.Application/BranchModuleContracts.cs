@@ -379,6 +379,7 @@ public interface ICafeOrderOperations
     Task<IReadOnlyList<CafeProfileSnapshot>> GetCafeProfilesAsync(CancellationToken cancellationToken = default);
     Task<CafeProfileDetailsSnapshot> GetCafeProfileAsync(Guid cafeCustomerId, CancellationToken cancellationToken = default);
     Task<CafeProfileSnapshot> CreateCafeProfileAsync(CreateCafeProfileCommand command, CancellationToken cancellationToken = default);
+    Task ArchiveCafeProfileAsync(Guid commandId, Guid cafeCustomerId, int expectedVersion, CancellationToken cancellationToken = default);
     Task<CafeProfileDetailsSnapshot> SaveCafePriceListAsync(SaveCafePriceListCommand command, CancellationToken cancellationToken = default);
     Task<CustomOrderSnapshot> CreateCustomOrderAsync(CreateCustomOrderCommand command, CancellationToken cancellationToken = default);
     Task<CustomOrderSnapshot> AddCustomOrderPaymentAsync(AddCustomOrderPaymentCommand command, CancellationToken cancellationToken = default);

@@ -43,11 +43,11 @@ if ($forbidden) {
 
 $compiler = Get-Command makensis.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1
 if (-not $compiler) {
-    foreach ($candidate in @((Join-Path $env:ProgramFiles 'NSIS\makensis.exe'), (Join-Path ${env:ProgramFiles(x86)} 'NSIS\makensis.exe'), (Join-Path $env:TEMP 'nsis-3.12-tools\nsis-3.12\Bin\makensis.exe'))) {
+    foreach ($candidate in @((Join-Path $env:ProgramFiles 'NSIS\makensis.exe'), (Join-Path ${env:ProgramFiles(x86)} 'NSIS\makensis.exe'), (Join-Path $env:TEMP 'nsis-3.12-tools\nsis-3.12\Bin\makensis.exe'), (Join-Path $env:TEMP 'nsis-3.11-kitchen\nsis-3.11\Bin\makensis.exe'))) {
         if (Test-Path -LiteralPath $candidate) { $compiler = $candidate; break }
     }
 }
-if (-not $compiler) { throw 'NSIS 3.12 is required to compile the installers.' }
+if (-not $compiler) { throw 'NSIS 3.11 or newer is required to compile the installers.' }
 
 & "$PSScriptRoot\..\shared\Sign-Artifact.ps1" -Path "$publishRoot\SugarERP.Branch1.exe" -Production:$Production
 foreach ($variant in @('Desktop', 'Touch')) {

@@ -208,6 +208,8 @@ td strong { color: var(--ink); }
 .switch-row input:checked + .switch { background: var(--primary); }
 .switch-row input:checked + .switch::after { transform: translateX(-17px); }
 .installer-grid .secondary-button { width: 100%; font-size: .78rem; }
+.installer-grid .cancel-download-button { width: 100%; min-height: 40px; margin-top: 8px; border: 1px solid #efb4bd; border-radius: 10px; background: #fff5f6; color: #a83448; display: flex; align-items: center; justify-content: center; gap: 7px; font-size: .78rem; font-weight: 800; }
+.installer-grid .cancel-download-button:hover { background: #ffe8eb; }
 .installer-note { display: flex; align-items: center; gap: 8px; margin: 18px 0 0; color: var(--muted); font-size: .76rem; }
 .global-error { margin-bottom: 20px; padding: 13px 16px; display: flex; align-items: center; gap: 10px; border-radius: 12px; background: #fff0f2; color: #a83448; }
 .global-error span { flex: 1; }

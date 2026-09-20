@@ -246,8 +246,8 @@ async function request<T>(
   return body as T;
 }
 
-async function downloadInstaller(path: string, token: string, onProgress?: (percent: number) => void) {
-  const response = await fetch(`/api/v1${path}`, { headers: { Authorization: `Bearer ${token}` } });
+async function downloadInstaller(path: string, token: string, onProgress?: (percent: number) => void, signal?: AbortSignal) {
+  const response = await fetch(`/api/v1${path}`, { headers: { Authorization: `Bearer ${token}` }, signal });
   if (!response.ok) throw new ApiError(response.status, await response.json().catch(() => ({})));
   const total = Number(response.headers.get('Content-Length'));
   const reader = response.body?.getReader();
@@ -284,12 +284,12 @@ export const api = {
   branchOneTouchRelease: (token: string) => request<{ version: string; filename: string; publishedAt: string; sha256: string; size: number; releaseNotes?: string }>('/releases/branch-type-1/touch/current', {}, token),
   kitchenRelease: (token: string) => request<{ version: string; filename: string; publishedAt: string; sha256: string; size: number; releaseNotes?: string }>('/releases/kitchen/current', {}, token),
   branchTwoRelease: (token: string) => request<{ version: string; filename: string; publishedAt: string; sha256: string; size: number; releaseNotes?: string }>('/releases/branch-type-2/current', {}, token),
-  downloadBranchOne: (token: string, variant: 'desktop' | 'touch' = 'desktop', onProgress?: (percent: number) => void) =>
-    downloadInstaller(`/releases/branch-type-1${variant === 'touch' ? '/touch' : ''}/current/download`, token, onProgress),
-  downloadKitchen: (token: string, onProgress?: (percent: number) => void) =>
-    downloadInstaller('/releases/kitchen/current/download', token, onProgress),
-  downloadBranchTwo: (token: string, onProgress?: (percent: number) => void) =>
-    downloadInstaller('/releases/branch-type-2/current/download', token, onProgress),
+  downloadBranchOne: (token: string, variant: 'desktop' | 'touch' = 'desktop', onProgress?: (percent: number) => void, signal?: AbortSignal) =>
+    downloadInstaller(`/releases/branch-type-1${variant === 'touch' ? '/touch' : ''}/current/download`, token, onProgress, signal),
+  downloadKitchen: (token: string, onProgress?: (percent: number) => void, signal?: AbortSignal) =>
+    downloadInstaller('/releases/kitchen/current/download', token, onProgress, signal),
+  downloadBranchTwo: (token: string, onProgress?: (percent: number) => void, signal?: AbortSignal) =>
+    downloadInstaller('/releases/branch-type-2/current/download', token, onProgress, signal),
   health: () => request<{ status: string; service: string }>('/health'),
   ready: () =>
     request<{ status: string; database: string; migrations: string }>('/ready'),

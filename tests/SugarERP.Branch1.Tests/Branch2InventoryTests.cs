@@ -9,6 +9,36 @@ namespace SugarERP.Branch1.Tests;
 public sealed class Branch2InventoryTests
 {
     [Fact]
+    public async Task PaymentBeforeConfirmation_AutoConfirmsAtomicallyAndArchiveIsIdempotent()
+    {
+        var (database, item, _) = await Create();
+        await using (var setup = database.CreateContext())
+        {
+            (await setup.CatalogItems.SingleAsync(x => x.Id == item)).RetailPriceMinor = 1_000;
+            await setup.SaveChangesAsync();
+        }
+        var modules = new BranchModuleOperationsService(database);
+        var cafe = await modules.CreateCafeProfileAsync(new CreateCafeProfileCommand(Guid.NewGuid(), "Cafe sync", "Cafe", "01012345678", "Test", null));
+        var order = await modules.CreateCustomOrderAsync(new CreateCustomOrderCommand(Guid.NewGuid(), cafe.Id, "Fast payment", DateTimeOffset.UtcNow.AddDays(1), [new CafeOrderLineInput(item, 1)]));
+        var paymentCommand = new AddCustomOrderPaymentCommand(Guid.NewGuid(), order.Id, order.Version, order.TotalMinor, PaymentMethod.Cash);
+
+        var paid = await modules.AddCustomOrderPaymentAsync(paymentCommand);
+        var replay = await modules.AddCustomOrderPaymentAsync(paymentCommand);
+        var archiveCommand = Guid.NewGuid();
+        await modules.ArchiveCafeProfileAsync(archiveCommand, cafe.Id, cafe.Version);
+        await modules.ArchiveCafeProfileAsync(archiveCommand, cafe.Id, cafe.Version);
+
+        Assert.Equal(CustomOrderStatus.Confirmed, paid.Status);
+        Assert.Equal(paid.PaidMinor, replay.PaidMinor);
+        await using var db = database.CreateContext();
+        Assert.Single(await db.CustomOrderPayments.ToListAsync());
+        Assert.Single(await db.OutboxMessages.Where(x => x.EventType == "custom_order.status_changed").ToListAsync());
+        Assert.Single(await db.OutboxMessages.Where(x => x.EventType == "custom_customer.payment_recorded").ToListAsync());
+        Assert.Single(await db.OutboxMessages.Where(x => x.EventType == "cafe_customer.archived").ToListAsync());
+        Assert.False((await db.CafeCustomers.SingleAsync(x => x.Id == cafe.Id)).Active);
+    }
+
+    [Fact]
     public async Task ActualCafeDeliveryAndKitchenReturnUseStockAndReplayOnlyOnce()
     {
         var (database, item, user) = await Create();

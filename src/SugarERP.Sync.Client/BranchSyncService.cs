@@ -145,6 +145,27 @@ public sealed class BranchSyncService(HttpClient httpClient, LocalDatabase datab
         }
 
         var now = DateTimeOffset.UtcNow;
+        // Versions before the Kitchen cafe-order fix permanently rejected these event types
+        // as WRONG_PROFILE. Re-open only that known server-side misclassification so real,
+        // already-created records can reach the server after an upgrade. Demo devices have
+        // already returned above and never enter this recovery path.
+        var recoverableWrongProfileEvents = await db.OutboxMessages
+            .Where(value => value.State == OutboxState.Failed
+                && value.LastErrorCode == "WRONG_PROFILE"
+                && (value.EventType == "custom_order.created"
+                    || value.EventType == "custom_order.status_changed"
+                    || value.EventType == "custom_customer.payment_recorded"))
+            .ToListAsync(cancellationToken);
+        if (recoverableWrongProfileEvents.Count > 0)
+        {
+            foreach (var message in recoverableWrongProfileEvents)
+            {
+                message.State = OutboxState.Pending;
+                message.NextAttemptAtUtc = now;
+                message.LastErrorCode = null;
+            }
+            await db.SaveChangesAsync(cancellationToken);
+        }
         var outstanding = await db.OutboxMessages
             .Where(value => value.State != OutboxState.Acknowledged)
             .OrderBy(value => value.DeviceSequence)

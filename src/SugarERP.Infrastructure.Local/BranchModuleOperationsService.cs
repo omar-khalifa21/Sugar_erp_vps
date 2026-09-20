@@ -1308,6 +1308,44 @@ public sealed class BranchModuleOperationsService(LocalDatabase database) : IBra
         return await GetCafeProfileAsync(command.CafeCustomerId, cancellationToken);
     }
 
+    public async Task ArchiveCafeProfileAsync(Guid commandId, Guid cafeCustomerId, int expectedVersion, CancellationToken cancellationToken = default)
+    {
+        ValidateCommandId(commandId);
+        if (cafeCustomerId == Guid.Empty || expectedVersion < 1)
+            throw Rule("INVALID_CAFE", "اختر الكافيه المطلوب حذفه.");
+        await database.WriteLock.WaitAsync(cancellationToken);
+        try
+        {
+            await using var db = database.CreateContext();
+            var replay = await db.OutboxMessages.AsNoTracking().SingleOrDefaultAsync(x => x.EventId == commandId, cancellationToken);
+            if (replay is not null)
+            {
+                if (replay.AggregateId != cafeCustomerId || replay.EventType != "cafe_customer.archived") throw IdempotencyReuse();
+                return;
+            }
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+            var configuration = await RequireBranchConfigurationAsync(db, cancellationToken);
+            if (configuration.Profile != DeviceProfile.BranchType2)
+                throw Rule("WRONG_PROFILE", "إدارة حسابات الكافيهات متاحة لفرع نوع ٢ فقط.");
+            var customer = await db.CafeCustomers.SingleOrDefaultAsync(x => x.Id == cafeCustomerId, cancellationToken)
+                ?? throw Rule("CAFE_NOT_FOUND", "لم يتم العثور على الكافيه.");
+            if (customer.Version != expectedVersion) throw Rule("STALE_VERSION", "تم تحديث الكافيه. أعد فتحه ثم حاول مرة أخرى.");
+            customer.Active = false;
+            customer.Version += 1;
+            customer.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            var sequence = await GetSequenceAsync(db, cancellationToken);
+            QueueEvent(db, sequence, customer.Id, "cafe_customer.archived", customer.UpdatedAtUtc, new
+            {
+                customer_id = customer.Id,
+                site_id = configuration.SiteId,
+                version = customer.Version
+            }, commandId);
+            await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+        }
+        finally { database.WriteLock.Release(); }
+    }
+
     public async Task<IReadOnlyList<CustomOrderSnapshot>> GetCustomOrdersAsync(CancellationToken cancellationToken = default)
     {
         await using var db = database.CreateContext();
@@ -1479,6 +1517,8 @@ public sealed class BranchModuleOperationsService(LocalDatabase database) : IBra
                 throw Rule("PAYMENT_EXCEEDS_BALANCE", "المبلغ أكبر من رصيد العميل المستحق.");
 
             var now = DateTimeOffset.UtcNow;
+            var autoConfirmed = order.Status == CustomOrderStatus.New;
+            if (autoConfirmed) order.Status = CustomOrderStatus.Confirmed;
             var payment = new CustomOrderPayment
             {
                 Id = Guid.NewGuid(),
@@ -1508,6 +1548,14 @@ public sealed class BranchModuleOperationsService(LocalDatabase database) : IBra
             printJob.DocumentVersion = order.Version;
             db.SideEffectJobs.Add(printJob);
             var sequence = await GetSequenceAsync(db, cancellationToken);
+            if (autoConfirmed)
+                QueueEvent(db, sequence, order.Id, "custom_order.status_changed", now, new
+                {
+                    custom_order_id = order.Id,
+                    status = "CONFIRMED",
+                    stock_lines = Array.Empty<object>(),
+                    version = order.Version
+                });
             QueueEvent(db, sequence, order.Id, "custom_customer.payment_recorded", now, new
             {
                 payment_id = payment.Id,
@@ -1667,8 +1715,7 @@ public sealed class BranchModuleOperationsService(LocalDatabase database) : IBra
         ValidateCommandId(command.CommandId);
         if (command.ActualCashMinor < 0)
             throw Rule("INVALID_ACTUAL_CASH", "النقدية الفعلية لا يمكن أن تكون سالبة.");
-        if (command.Counts.Count == 0
-            || command.Counts.Any(value => value.ItemId == Guid.Empty || value.ActualScaled < 0)
+        if (command.Counts.Any(value => value.ItemId == Guid.Empty || value.ActualScaled < 0)
             || command.Counts.Select(value => value.ItemId).Distinct().Count() != command.Counts.Count)
             throw Rule("INVALID_STOCK_COUNT", "أدخل العد الفعلي لكل الأصناف مرة واحدة.");
 

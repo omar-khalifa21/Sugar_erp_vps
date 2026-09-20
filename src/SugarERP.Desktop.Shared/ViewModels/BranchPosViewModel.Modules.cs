@@ -1332,12 +1332,6 @@ public sealed partial class BranchPosViewModel
             }
             result.Add(new ClosingCountInput(row.ItemId, quantity));
         }
-        if (result.Count == 0)
-        {
-            inputs = [];
-            message = "لا توجد أصناف ضمن لقطة الوردية.";
-            return false;
-        }
         inputs = result;
         message = string.Empty;
         return true;
