@@ -710,7 +710,11 @@ function CafePage({ items, onLoad, onCreate, onUpdate, onArchive, onSetPrice }: 
     catch (caught) { setMessage(friendlyError(caught)); }
     finally { setLoading(false); }
   }, [onLoad]);
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    void refresh();
+    const timer = window.setInterval(() => { void onLoad().then(setOverview).catch(() => undefined); }, 10_000);
+    return () => window.clearInterval(timer);
+  }, [refresh, onLoad]);
 
   const selected = overview?.customers.find((customer) => customer.id === selectedId) ?? null;
   const selectedInvoice = selected?.invoices.find((invoice) => invoice.id === selectedInvoiceId) ?? null;
