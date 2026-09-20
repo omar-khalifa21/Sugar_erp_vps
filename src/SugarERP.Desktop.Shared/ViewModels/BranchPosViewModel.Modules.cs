@@ -16,6 +16,7 @@ public sealed partial class BranchPosViewModel
     private AsyncRelayCommand _submitRequestCommand = null!;
     private AsyncRelayCommand _createDemoShipmentCommand = null!;
     private AsyncRelayCommand _receiveShipmentCommand = null!;
+    private AsyncRelayCommand _postManualIncomingCommand = null!;
     private AsyncRelayCommand _refundSaleCommand = null!;
     private AsyncRelayCommand _submitReturnCommand = null!;
     private RelayCommand _advanceCloseStepCommand = null!;
@@ -43,6 +44,7 @@ public sealed partial class BranchPosViewModel
     private CatalogRowViewModel? _selectedCatalogItem;
     private string _requestStatusText = "اختر الكميات واضغط حفظ الطلب وإرساله. يعمل حتى بدون إنترنت.";
     private string _incomingStatusText = "تظهر هنا الشحنات التي أرسلها المطبخ.";
+    private string _manualIncomingReason = string.Empty;
     private string _shiftHistorySummaryText = string.Empty;
     private string _returnStatusText = "مرتجع المطبخ مستند مستقل ويخصم الرصيد مرة واحدة عند الإرسال.";
     private string _closingSummaryText = string.Empty;
@@ -73,6 +75,7 @@ public sealed partial class BranchPosViewModel
     public ObservableCollection<RequestHistoryRowViewModel> RequestHistoryRows { get; } = [];
     public ObservableCollection<IncomingRowViewModel> IncomingRows { get; } = [];
     public ObservableCollection<IncomingCountRowViewModel> IncomingCountRows { get; } = [];
+    public ObservableCollection<QuantityEntryRowViewModel> ManualIncomingRows { get; } = [];
     public ObservableCollection<SaleHistoryRowViewModel> SaleRows { get; } = [];
     public ObservableCollection<SaleLineCorrectionRowViewModel> SaleDetailLines { get; } = [];
     public ObservableCollection<QuantityEntryRowViewModel> ReturnRows { get; } = [];
@@ -83,6 +86,7 @@ public sealed partial class BranchPosViewModel
     public string CatalogSummaryText { get => _catalogSummaryText; private set => SetProperty(ref _catalogSummaryText, value); }
     public string RequestStatusText { get => _requestStatusText; private set => SetProperty(ref _requestStatusText, value); }
     public string IncomingStatusText { get => _incomingStatusText; private set => SetProperty(ref _incomingStatusText, value); }
+    public string ManualIncomingReason { get => _manualIncomingReason; set => SetProperty(ref _manualIncomingReason, value); }
     public string ShiftHistorySummaryText { get => _shiftHistorySummaryText; private set => SetProperty(ref _shiftHistorySummaryText, value); }
     public string ReturnStatusText { get => _returnStatusText; private set => SetProperty(ref _returnStatusText, value); }
     public string ClosingSummaryText { get => _closingSummaryText; private set => SetProperty(ref _closingSummaryText, value); }
@@ -270,6 +274,7 @@ public sealed partial class BranchPosViewModel
     public ICommand AddRequestLineCommand => _addRequestLineCommand;
     public ICommand CreateDemoShipmentCommand => _createDemoShipmentCommand;
     public ICommand ReceiveShipmentCommand => _receiveShipmentCommand;
+    public ICommand PostManualIncomingCommand => _postManualIncomingCommand;
     public ICommand RefundSaleCommand => _refundSaleCommand;
     public ICommand AddReturnLineCommand => _addReturnLineCommand;
     public ICommand SubmitReturnCommand => _submitReturnCommand;
@@ -297,6 +302,7 @@ public sealed partial class BranchPosViewModel
         _submitRequestCommand = new AsyncRelayCommand(SubmitRequestAsync, () => !IsBusy);
         _createDemoShipmentCommand = new AsyncRelayCommand(CreateDemoShipmentAsync, () => IsDemo && !IsBusy);
         _receiveShipmentCommand = new AsyncRelayCommand(ReceiveShipmentAsync, () => SelectedIncoming?.Snapshot.IsReceivable == true && !IsBusy);
+        _postManualIncomingCommand = new AsyncRelayCommand(PostManualIncomingAsync, () => IsShiftOpen && !IsBusy);
         _refundSaleCommand = new AsyncRelayCommand(RefundSaleAsync, () => !IsBusy);
         _submitReturnCommand = new AsyncRelayCommand(SubmitReturnAsync, () => IsShiftOpen && !IsBusy);
         _advanceCloseStepCommand = new RelayCommand(AdvanceCloseStep, () => CloseStep < 4);
@@ -324,6 +330,7 @@ public sealed partial class BranchPosViewModel
         _submitRequestCommand.NotifyCanExecuteChanged();
         _createDemoShipmentCommand.NotifyCanExecuteChanged();
         _receiveShipmentCommand.NotifyCanExecuteChanged();
+        _postManualIncomingCommand.NotifyCanExecuteChanged();
         _refundSaleCommand.NotifyCanExecuteChanged();
         _submitReturnCommand.NotifyCanExecuteChanged();
         _closeShiftCommand.NotifyCanExecuteChanged();
@@ -650,6 +657,11 @@ public sealed partial class BranchPosViewModel
 
     private async Task LoadIncomingAsync()
     {
+        var catalog = await _moduleOperations.GetCatalogAsync();
+        ManualIncomingRows.Clear();
+        foreach (var item in catalog.Items.Where(value => value.Active).OrderBy(value => value.NameAr))
+            ManualIncomingRows.Add(new QuantityEntryRowViewModel(item.Id, item.NameAr, item.Unit, item.QuantityScale,
+                ArabicDisplay.Quantity(item.QuantityScaled, item.QuantityScale, item.Unit)));
         var selectedId = SelectedIncoming?.Id;
         var shipments = await _moduleOperations.GetIncomingShipmentsAsync();
         HasIncomingShipments = shipments.Count > 0;
@@ -669,6 +681,25 @@ public sealed partial class BranchPosViewModel
         IncomingStatusText = shipments.Count == 0
             ? "لا توجد شحنات للاستلام الآن."
             : $"{shipments.Count} طلب وارد · {shipments.Count(value => value.IsReceivable)} بانتظار العد والاستلام.";
+    }
+
+    private async Task PostManualIncomingAsync()
+    {
+        if (!TryReadPositiveRows(ManualIncomingRows, out var lines, out var message)) { IncomingStatusText = message; return; }
+        IsBusy = true;
+        try
+        {
+            await _moduleOperations.PostManualIncomingAsync(new PostManualIncomingCommand(Guid.NewGuid(), ManualIncomingReason, lines));
+            ClearQuantities(ManualIncomingRows);
+            ManualIncomingReason = string.Empty;
+            var sync = await _syncService.SynchronizeAsync();
+            await RefreshSnapshotAsync();
+            await LoadIncomingAsync();
+            IncomingStatusText = sync.Succeeded ? "تمت إضافة الوارد اليدوي ومزامنته مع الخادم." : $"تم حفظ الوارد محلياً. {sync.UserMessage}";
+        }
+        catch (BusinessRuleException exception) { IncomingStatusText = exception.UserMessage; }
+        catch { IncomingStatusText = "تعذر حفظ الوارد اليدوي. لم تتغير الكميات."; }
+        finally { IsBusy = false; }
     }
 
     private async Task CreateDemoShipmentAsync()

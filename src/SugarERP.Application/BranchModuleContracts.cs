@@ -96,6 +96,13 @@ public sealed record IncomingReceiptResult(
     IncomingReceiptStatus Status,
     bool EntireShipmentHeld,
     bool WasAlreadyCommitted);
+public sealed record PostManualIncomingCommand(
+    Guid CommandId,
+    string Reason,
+    IReadOnlyList<QuantityInput> Lines,
+    Guid? UserId = null,
+    string? Authorization = null);
+public sealed record ManualIncomingResult(Guid DocumentId, bool WasAlreadyCommitted);
 
 public sealed record DispatchKitchenReturnCommand(Guid CommandId, string Reason, IReadOnlyList<QuantityInput> Lines, Guid? UserId = null, string? Authorization = null);
 public sealed record KitchenReturnSnapshot(
@@ -354,6 +361,7 @@ public interface IBranchLogisticsOperations
     Task<IReadOnlyList<IncomingShipmentSnapshot>> GetIncomingShipmentsAsync(CancellationToken cancellationToken = default);
     Task<IncomingShipmentSnapshot> CreateSyntheticDemoShipmentAsync(Guid commandId, CancellationToken cancellationToken = default);
     Task<IncomingReceiptResult> ReceiveShipmentAsync(ReceiveShipmentCommand command, CancellationToken cancellationToken = default);
+    Task<ManualIncomingResult> PostManualIncomingAsync(PostManualIncomingCommand command, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<KitchenReturnSnapshot>> GetKitchenReturnsAsync(CancellationToken cancellationToken = default);
     Task<KitchenReturnSnapshot> DispatchKitchenReturnAsync(DispatchKitchenReturnCommand command, CancellationToken cancellationToken = default);
 }

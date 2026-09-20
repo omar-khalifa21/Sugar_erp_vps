@@ -63,6 +63,7 @@ export class TransferProjectionService {
       case 'ingredient.counted': return this.ingredientCount(tx, event, siteId, profile);
       case 'incoming_receipt.accepted':
       case 'incoming_receipt.disputed': return this.receipt(tx, event, siteId, profile);
+      case 'manual_incoming.posted': return this.manualIncoming(tx, event, siteId, profile);
       case 'catalog.item.updated': return this.catalogItem(tx, event, siteId, profile);
       case 'catalog.item.deleted': return this.archiveCatalogItem(tx, event, siteId, profile);
       case 'cafe_customer.created': return this.cafeCustomer(tx, event, siteId);
@@ -75,6 +76,27 @@ export class TransferProjectionService {
       case 'custom_customer.payment_recorded': return this.cafePayment(tx, event, siteId, profile);
       case 'custom_order.status_changed': return this.cafeStatus(tx, event, siteId, profile);
       default: return;
+    }
+  }
+  private async manualIncoming(tx: Client, event: SyncEventDto, siteId: string, profile: DeviceProfile) {
+    if (profile === DeviceProfile.KITCHEN) error('WRONG_PROFILE', 'Manual incoming is available to branches only', 403);
+    const payload = object(event.payload);
+    if (id(payload.document_id) !== event.id || id(payload.site_id) !== siteId) error('WRONG_SITE', 'Manual incoming belongs to another site', 403);
+    id(payload.shift_id);
+    text(payload.reason, 500);
+    const expectedLocation = profile === DeviceProfile.BRANCH_TYPE_2 ? StockLocation.FREEZER : StockLocation.SALEABLE;
+    if (payload.location !== expectedLocation) error('INVALID_INVENTORY', 'Manual incoming location does not match the branch profile');
+    const rows = lines(payload.lines);
+    const itemIds = rows.map((row) => id(row.item_id));
+    if (new Set(itemIds).size !== rows.length) error('INVALID_INVENTORY', 'Manual incoming repeats an item');
+    const catalog = await tx.item.findMany({ where: { id: { in: itemIds }, active: true }, select: { id: true } });
+    if (catalog.length !== rows.length) error('DEPENDENCY_NOT_READY', 'Manual incoming contains an unknown product', 409);
+    for (const row of rows) {
+      const itemId = id(row.item_id), amount = quantity(row.quantity_scaled);
+      const key = { siteId, itemId, location: expectedLocation };
+      await tx.stockBalance.upsert({ where: { siteId_itemId_location: key },
+        create: { ...key, quantityScaled: amount, asOfAt: new Date(event.occurred_at), sourceEventId: event.id },
+        update: { quantityScaled: { increment: amount }, version: { increment: 1 }, asOfAt: new Date(event.occurred_at), sourceEventId: event.id } });
     }
   }
   private async catalogItem(tx: Client, event: SyncEventDto, siteId: string, profile: DeviceProfile) {

@@ -142,6 +142,11 @@ public sealed class Branch2ApplicationService(LocalDatabase database, HttpClient
     {
         RequireSession(); return new BranchModuleOperationsService(database).ReceiveShipmentAsync(command with { UserId = _userId, Authorization = _authorization });
     }
+    public Task<ManualIncomingResult> PostManualIncomingAsync(Guid commandId, string reason, IReadOnlyList<QuantityInput> lines)
+    {
+        RequireSession();
+        return new BranchModuleOperationsService(database).PostManualIncomingAsync(new(commandId, reason, lines, _userId, _authorization));
+    }
     public Task<OpenShiftSnapshot> OpenShiftAsync(ShiftKind kind, long cash) { RequireSession(); return new BranchOperationsService(database).OpenShiftAsync(kind, cash); }
     public Task<ClosingPreviewSnapshot> ClosingPreviewAsync() { RequireSession(); return new BranchModuleOperationsService(database).GetClosingPreviewAsync(); }
     public async Task<Branch2CloseResult> CloseDayAsync(Guid commandId, IReadOnlyList<ClosingCountInput> counts, long actualCashMinor)

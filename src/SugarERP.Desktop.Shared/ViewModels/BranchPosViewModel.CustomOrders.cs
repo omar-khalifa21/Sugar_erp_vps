@@ -243,10 +243,13 @@ public sealed partial class BranchPosViewModel
             var copyId = CafeCopySource?.Id;
             var created = await _moduleOperations.CreateCafeProfileAsync(new CreateCafeProfileCommand(
                 Guid.NewGuid(), NewCafeName, NewCustomerIsCafe ? "كافيه" : "سوبر ماركت", NewCafePhone, NewCafeAddress, copyId));
+            var sync = await _syncService.SynchronizeAsync();
             IsCreatingCafe = false;
             await LoadCustomOrdersAsync();
             SelectedCafe = CafeProfiles.FirstOrDefault(value => value.Id == created.Id);
-            CustomOrderStatusText = copyId is null ? "تم إنشاء الحساب بأسعار الأصناف الحالية." : "تم إنشاء الحساب ونسخ قائمة الأسعار. يمكنك تعديلها دون تغيير العميل الأصلي.";
+            CustomOrderStatusText = sync.Succeeded
+                ? "تم إنشاء الحساب ومزامنته مع لوحة الإدارة."
+                : $"تم إنشاء الحساب محلياً. {sync.UserMessage}";
         }
         catch (BusinessRuleException exception) { CustomOrderStatusText = exception.UserMessage; }
         catch { CustomOrderStatusText = "تعذر إنشاء الحساب. لم يتغير شيء."; }

@@ -710,6 +710,86 @@ public sealed class BranchModuleOperationsService(LocalDatabase database) : IBra
         }
     }
 
+    public async Task<ManualIncomingResult> PostManualIncomingAsync(
+        PostManualIncomingCommand command,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateCommandId(command.CommandId);
+        ValidateQuantityInputs(command.Lines, "أدخل كمية وارد موجبة لصنف واحد على الأقل.");
+        var reason = command.Reason.Trim();
+        if (reason.Length < 3) throw Rule("REASON_REQUIRED", "اكتب مصدر أو سبب الوارد اليدوي.");
+
+        await database.WriteLock.WaitAsync(cancellationToken);
+        try
+        {
+            await using var db = database.CreateContext();
+            var existing = await db.OutboxMessages.AsNoTracking().SingleOrDefaultAsync(x => x.EventId == command.CommandId, cancellationToken);
+            if (existing is not null)
+            {
+                if (existing.EventType != "manual_incoming.posted") throw IdempotencyReuse();
+                return new ManualIncomingResult(command.CommandId, true);
+            }
+
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+            var shift = await RequireOpenShiftAsync(db, cancellationToken);
+            var configuration = await db.DeviceConfigurations.SingleAsync(cancellationToken);
+            if (configuration.Profile == DeviceProfile.Kitchen) throw Rule("WRONG_PROFILE", "الوارد اليدوي متاح للفروع فقط.");
+            if (configuration.Profile == DeviceProfile.BranchType2) RequireLocationActor(command.UserId, command.Authorization);
+
+            var itemIds = command.Lines.Select(x => x.ItemId).ToArray();
+            var items = await db.CatalogItems.Where(x => itemIds.Contains(x.Id) && x.Active).ToDictionaryAsync(x => x.Id, cancellationToken);
+            if (items.Count != itemIds.Length) throw Rule("ITEM_NOT_FOUND", "أحد أصناف الوارد غير متاح.");
+            var now = DateTimeOffset.UtcNow;
+            BranchInventoryTransaction? locationTransaction = null;
+            if (configuration.Profile == DeviceProfile.BranchType2)
+            {
+                locationTransaction = new BranchInventoryTransaction
+                {
+                    Id = command.CommandId, ReferenceId = command.CommandId, SiteId = configuration.SiteId,
+                    UserId = command.UserId!.Value, Kind = Branch2TransactionKind.IncomingReceipt,
+                    Reason = reason, Fingerprint = command.CommandId.ToString(), OccurredAtUtc = now
+                };
+                db.InventoryTransactions.Add(locationTransaction);
+            }
+
+            var eventLines = new List<object>();
+            foreach (var input in command.Lines.OrderBy(x => x.ItemId))
+            {
+                var sourceLineId = Guid.NewGuid();
+                if (locationTransaction is not null)
+                {
+                    var balance = await db.LocationBalances.FindAsync([input.ItemId, BranchInventoryLocation.Stock], cancellationToken);
+                    if (balance is null) { balance = new BranchLocationBalance { ItemId = input.ItemId, Location = BranchInventoryLocation.Stock }; db.LocationBalances.Add(balance); }
+                    balance.QuantityScaled = checked(balance.QuantityScaled + input.QuantityScaled);
+                    balance.Version = checked(balance.Version + 1);
+                    locationTransaction.Lines.Add(new BranchInventoryTransactionLine { Id = sourceLineId, ItemId = input.ItemId, Location = BranchInventoryLocation.Stock, DeltaScaled = input.QuantityScaled });
+                }
+                else
+                {
+                    var balance = await db.StockBalances.SingleAsync(x => x.ItemId == input.ItemId, cancellationToken);
+                    balance.QuantityScaled = checked(balance.QuantityScaled + input.QuantityScaled);
+                    balance.Revision = checked(balance.Revision + 1);
+                    balance.AsOfUtc = now;
+                }
+                var snapshot = await GetOrCreateShiftSnapshotAsync(db, shift, input.ItemId, cancellationToken);
+                snapshot.IncomingScaled = checked(snapshot.IncomingScaled + input.QuantityScaled);
+                snapshot.ExpectedCloseScaled = checked(snapshot.ExpectedCloseScaled + input.QuantityScaled);
+                db.StockMovements.Add(new StockMovement { Id = Guid.NewGuid(), DocumentId = command.CommandId, SourceLineId = sourceLineId,
+                    ItemId = input.ItemId, ShiftId = shift.Id, Kind = StockMovementKind.IncomingReceipt, DeltaScaled = input.QuantityScaled, OccurredAtUtc = now });
+                eventLines.Add(new { item_id = input.ItemId, quantity_scaled = input.QuantityScaled.ToString(System.Globalization.CultureInfo.InvariantCulture) });
+            }
+            var sequence = await GetSequenceAsync(db, cancellationToken);
+            QueueEvent(db, sequence, command.CommandId, "manual_incoming.posted", now, new {
+                document_id = command.CommandId, site_id = configuration.SiteId, shift_id = shift.Id, reason,
+                location = configuration.Profile == DeviceProfile.BranchType2 ? "FREEZER" : "SALEABLE", lines = eventLines
+            }, command.CommandId);
+            await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return new ManualIncomingResult(command.CommandId, false);
+        }
+        finally { database.WriteLock.Release(); }
+    }
+
     public async Task<IReadOnlyList<KitchenReturnSnapshot>> GetKitchenReturnsAsync(CancellationToken cancellationToken = default)
     {
         await using var db = database.CreateContext();

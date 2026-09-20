@@ -165,6 +165,27 @@ public sealed class BranchModuleOperationsServiceTests
     }
 
     [Fact]
+    public async Task PostManualIncomingAsync_PostsOnceAndQueuesVpsSyncEvent()
+    {
+        await using var store = await ModuleTestStore.CreateAsync();
+        var shift = await store.Operations.OpenShiftAsync(ShiftKind.Morning, 0);
+        var before = await ReadBalancesAsync(store.Database, [ChocolateCakeId]);
+        var command = new PostManualIncomingCommand(Guid.NewGuid(), "توريد مباشر من المخزن", [new QuantityInput(ChocolateCakeId, 7)]);
+
+        var first = await store.Modules.PostManualIncomingAsync(command);
+        var replay = await store.Modules.PostManualIncomingAsync(command);
+
+        Assert.False(first.WasAlreadyCommitted);
+        Assert.True(replay.WasAlreadyCommitted);
+        await using var db = store.Database.CreateContext();
+        Assert.Equal(before[ChocolateCakeId] + 7, (await db.StockBalances.SingleAsync(x => x.ItemId == ChocolateCakeId)).QuantityScaled);
+        Assert.Equal(7, (await db.ShiftItemSnapshots.SingleAsync(x => x.ShiftId == shift.Id && x.ItemId == ChocolateCakeId)).IncomingScaled);
+        Assert.Single(await db.StockMovements.Where(x => x.DocumentId == command.CommandId && x.Kind == StockMovementKind.IncomingReceipt).ToListAsync());
+        var message = Assert.Single(await db.OutboxMessages.Where(x => x.EventId == command.CommandId && x.EventType == "manual_incoming.posted").ToListAsync());
+        Assert.Contains("توريد مباشر", message.PayloadJson);
+    }
+
+    [Fact]
     public async Task DispatchKitchenReturnAsync_ReplayDoesNotDeductStockTwice()
     {
         await using var store = await ModuleTestStore.CreateAsync();
