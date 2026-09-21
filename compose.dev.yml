@@ -34,17 +34,16 @@ services:
     networks: [backend]
     restart: "no"
 
-  seed:
+  bootstrap-admin:
     build:
       context: .
       dockerfile: deploy/backend/Dockerfile
       target: development
-    command: npm run seed:dev
+    command: npm run bootstrap:admin --workspace @sugar-erp/server
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-sugar_erp}:${POSTGRES_PASSWORD:-local-development-password}@postgres:5432/${POSTGRES_DB:-sugar_erp}?schema=public
-      DEV_ADMIN_USERNAME: ${DEV_ADMIN_USERNAME:-admin}
-      DEV_ADMIN_PASSWORD: ${DEV_ADMIN_PASSWORD:-SugarAdmin2026!}
-      DEV_SEED_SYNTHETIC: "true"
+      BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:?Set BOOTSTRAP_ADMIN_USERNAME in .env}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?Set BOOTSTRAP_ADMIN_PASSWORD in .env}
     depends_on:
       postgres:
         condition: service_healthy
@@ -70,7 +69,7 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-      seed:
+      bootstrap-admin:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/v1/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
@@ -88,7 +87,6 @@ services:
     command: npm run dev --workspace @sugar-erp/admin-web
     environment:
       VITE_API_PROXY_TARGET: http://api:3000
-      VITE_SHOW_DEMO_CREDENTIALS: "true"
     ports:
       - "127.0.0.1:${ADMIN_WEB_PORT:-4173}:4173"
     depends_on:

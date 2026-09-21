@@ -261,7 +261,6 @@ internal static class IncomingSyncApplier
             Status = ShipmentStatus.AwaitingReceipt,
             Version = version,
             DispatchedAtUtc = ParseDate(RequiredString(payload, "dispatched_at")),
-            SyntheticDemo = false
         };
         foreach (var row in linesElement.EnumerateArray())
         {

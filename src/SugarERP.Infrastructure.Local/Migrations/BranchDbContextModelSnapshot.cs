@@ -1516,9 +1516,6 @@ namespace SugarERP.Infrastructure.Local.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
-                    b.Property<bool>("SyntheticDemo")
-                        .HasColumnType("INTEGER");
-
                     b.Property<int>("Version")
                         .HasColumnType("INTEGER");
 

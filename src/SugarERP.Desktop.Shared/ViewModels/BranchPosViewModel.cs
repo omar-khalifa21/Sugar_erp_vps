@@ -55,7 +55,6 @@ public sealed partial class BranchPosViewModel : ViewModelBase
         IBranchPrinter printer,
         IEnrollmentClient enrollmentClient,
         IBranchSyncService syncService,
-        bool isDemo,
         string? appVersion = null)
     {
         _operations = operations;
@@ -64,7 +63,6 @@ public sealed partial class BranchPosViewModel : ViewModelBase
         _shiftReportWriter = shiftReportWriter;
         _enrollmentClient = enrollmentClient;
         _syncService = syncService;
-        IsDemo = isDemo;
         _appVersion = string.IsNullOrWhiteSpace(appVersion) ? "1.0.0" : appVersion;
 
         _openShiftCommand = new AsyncRelayCommand(OpenShiftAsync, CanOpenShift);
@@ -86,7 +84,6 @@ public sealed partial class BranchPosViewModel : ViewModelBase
     public ObservableCollection<ProductTileViewModel> Products { get; } = [];
     public ObservableCollection<CartLineViewModel> Cart { get; } = [];
 
-    public bool IsDemo { get; }
     public bool IsBusy
     {
         get => _isBusy;
@@ -358,12 +355,9 @@ public sealed partial class BranchPosViewModel : ViewModelBase
         try
         {
             await _operations.InitializeAsync();
-            if (IsDemo) await _operations.SeedSyntheticDemoAsync();
             await RefreshSnapshotAsync();
             await InitializeModuleDataAsync();
-            StatusMessage = IsDemo
-                ? "وضع تجريبي"
-                : NeedsEnrollment
+            StatusMessage = NeedsEnrollment
                     ? "اربط الجهاز بالخادم من الإعدادات لإرسال البيانات والبدء في العمل."
                     : "تم تحميل البيانات المحلية بأمان.";
         }

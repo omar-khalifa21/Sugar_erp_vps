@@ -14,7 +14,7 @@ postgres-data/
 uploads/
 reports/
 backups/
-releases/
+/releases/
 *.dump
 certificates/
 *.key

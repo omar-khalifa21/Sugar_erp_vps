@@ -16,7 +16,6 @@ public sealed partial class MainWindow : Window
     private bool _compactPos;
     private readonly LocalDatabase? _database;
     private readonly HttpClient? _http;
-    private readonly bool _isDemo;
     private DesktopReleaseManifest? _availableUpdate;
     private readonly DeploymentConfiguration _deployment = DeploymentConfiguration.Create(DesktopApplicationType.BranchType1);
     private readonly CancellationTokenSource _updateStop = new();
@@ -28,13 +27,12 @@ public sealed partial class MainWindow : Window
         SizeChanged += (_, _) => UpdatePosLayout();
     }
 
-    public MainWindow(BranchPosViewModel viewModel, LocalDatabase database, HttpClient http, bool isDemo, bool isTouch = false)
+    public MainWindow(BranchPosViewModel viewModel, LocalDatabase database, HttpClient http, bool isTouch = false)
     {
         InitializeComponent();
         _viewModel = viewModel;
         _database = database;
         _http = http;
-        _isDemo = isDemo;
         if (isTouch) Classes.Add("touch");
         DataContext = viewModel;
         Opened += OnOpened;
@@ -47,12 +45,11 @@ public sealed partial class MainWindow : Window
     {
         Opened -= OnOpened;
         await _viewModel.InitializeAsync();
-        if (!_isDemo) _ = RunPeriodicUpdateChecksAsync(_updateStop.Token);
+        _ = RunPeriodicUpdateChecksAsync(_updateStop.Token);
     }
 
     private async void Update_Click(object? sender, RoutedEventArgs e)
     {
-        if (_isDemo) { this.FindControl<Button>("UpdateButton")!.Content = "Updates disabled in demo"; return; }
         if (_availableUpdate is null) { await CheckForUpdatesAsync(true); return; }
         try
         {

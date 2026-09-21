@@ -432,98 +432,6 @@ public sealed class BranchModuleOperationsService(LocalDatabase database) : IBra
             .ToArray();
     }
 
-    public async Task<IncomingShipmentSnapshot> CreateSyntheticDemoShipmentAsync(
-        Guid commandId,
-        CancellationToken cancellationToken = default)
-    {
-        ValidateCommandId(commandId);
-        await database.WriteLock.WaitAsync(cancellationToken);
-        try
-        {
-            await using var db = database.CreateContext();
-            var configuration = await RequireBranchConfigurationAsync(db, cancellationToken);
-            if (!DeviceCredentialProtector.IsDemo(configuration.DeviceCredential))
-                throw Rule("DEMO_ONLY", "إنشاء شحنة تجريبية متاح في وضع العرض فقط. في التشغيل الفعلي تصل الشحنات الموقعة من الخادم.");
-            var existing = await db.Shipments.AsNoTracking()
-                .Include(value => value.Lines)
-                .Include(value => value.Receipt)
-                    .ThenInclude(value => value!.Lines)
-                .SingleOrDefaultAsync(value => value.CommandId == commandId, cancellationToken);
-            if (existing is not null) return ToShipmentSnapshot(existing);
-
-            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
-            var candidateRequests = await db.KitchenRequests
-                .Include(value => value.Lines)
-                .Where(value => value.Status == KitchenRequestStatus.Submitted || value.Status == KitchenRequestStatus.Approved || value.Status == KitchenRequestStatus.Partial)
-                .ToListAsync(cancellationToken);
-            var request = candidateRequests
-                .OrderBy(value => value.RequestedAtUtc)
-                .FirstOrDefault()
-                ?? throw Rule("REQUEST_REQUIRED", "أرسل طلب وارد أولاً، ثم استخدم محاكاة وصول الشحنة في وضع العرض.");
-
-            var remaining = request.Lines
-                .Select(value => new { Line = value, Remaining = value.RequestedScaled - value.SentScaled })
-                .Where(value => value.Remaining > 0)
-                .ToArray();
-            if (remaining.Length == 0)
-                throw Rule("REQUEST_FULFILLED", "طلب الوارد المحدد تم شحنه بالكامل.");
-
-            var now = DateTimeOffset.UtcNow;
-            var shipment = new Shipment
-            {
-                Id = Guid.NewGuid(),
-                CommandId = commandId,
-                RequestId = request.Id,
-                Reference = $"DEMO-IN-{now:yyyyMMddHHmmss}-{request.Id.ToString("N")[..4].ToUpperInvariant()}",
-                Status = ShipmentStatus.AwaitingReceipt,
-                Version = 1,
-                DispatchedAtUtc = now,
-                SyntheticDemo = true
-            };
-            for (var index = 0; index < remaining.Length; index += 1)
-            {
-                var source = remaining[index];
-                // The demo intentionally demonstrates partial fulfillment on the second
-                // line while keeping the server-owned sent quantity immutable.
-                var sent = index == 1 && source.Remaining > 2L * source.Line.QuantityScale
-                    ? 2L * source.Line.QuantityScale
-                    : source.Remaining;
-                var line = new ShipmentLine
-                {
-                    Id = Guid.NewGuid(),
-                    ShipmentId = shipment.Id,
-                    RequestLineId = source.Line.Id,
-                    ItemId = source.Line.ItemId,
-                    NameSnapshot = source.Line.NameSnapshot,
-                    UnitSnapshot = source.Line.UnitSnapshot,
-                    QuantityScale = source.Line.QuantityScale,
-                    SentScaled = sent
-                };
-                shipment.Lines.Add(line);
-                source.Line.ApprovedScaled ??= source.Line.RequestedScaled;
-                source.Line.SentScaled += sent;
-            }
-            request.Version += 1;
-            request.Status = request.Lines.All(value => value.SentScaled >= value.RequestedScaled)
-                ? KitchenRequestStatus.Fulfilled
-                : KitchenRequestStatus.Partial;
-            db.Shipments.Add(shipment);
-            db.InboxMessages.Add(new InboxMessage
-            {
-                EventId = commandId,
-                ContentHash = new string('0', 64),
-                AppliedAtUtc = now
-            });
-            await db.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-            return ToShipmentSnapshot(shipment);
-        }
-        finally
-        {
-            database.WriteLock.Release();
-        }
-    }
-
     public async Task<IncomingReceiptResult> ReceiveShipmentAsync(
         ReceiveShipmentCommand command,
         CancellationToken cancellationToken = default)
@@ -2335,7 +2243,6 @@ public sealed class BranchModuleOperationsService(LocalDatabase database) : IBra
             shipment.Status,
             shipment.Version,
             shipment.DispatchedAtUtc,
-            shipment.SyntheticDemo,
             shipment.Lines.OrderBy(value => value.NameSnapshot).Select(value => new ShipmentLineSnapshot(
                 value.Id,
                 value.ItemId,

@@ -5,18 +5,13 @@ namespace SugarERP.Infrastructure.Local;
 
 public static class DeviceCredentialProtector
 {
-    public const string DemoCredential = "demo:synthetic-development-only";
-
     private const string ProtectedPrefix = "dpapi:";
     private static readonly byte[] Entropy = Encoding.UTF8.GetBytes("SugarERP.BranchType1.DeviceCredential.v1");
-
-    public static bool IsDemo(string storedCredential) =>
-        string.Equals(storedCredential, DemoCredential, StringComparison.Ordinal);
 
     public static string Protect(string credential)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(credential);
-        if (IsDemo(credential) || credential.StartsWith(ProtectedPrefix, StringComparison.Ordinal))
+        if (credential.StartsWith(ProtectedPrefix, StringComparison.Ordinal))
             return credential;
         if (!OperatingSystem.IsWindows())
             throw new PlatformNotSupportedException("Device credentials can only be persisted by the Windows desktop client.");
@@ -31,8 +26,6 @@ public static class DeviceCredentialProtector
     public static string Unprotect(string storedCredential)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(storedCredential);
-        if (IsDemo(storedCredential))
-            return storedCredential;
         if (!storedCredential.StartsWith(ProtectedPrefix, StringComparison.Ordinal))
             throw new InvalidOperationException("The stored device credential is not protected. Re-enrollment is required.");
         if (!OperatingSystem.IsWindows())

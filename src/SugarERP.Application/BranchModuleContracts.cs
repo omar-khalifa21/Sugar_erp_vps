@@ -84,7 +84,6 @@ public sealed record IncomingShipmentSnapshot(
     ShipmentStatus Status,
     int Version,
     DateTimeOffset DispatchedAtUtc,
-    bool SyntheticDemo,
     IReadOnlyList<ShipmentLineSnapshot> Lines,
     Guid? ReceiptId,
     bool IsReceivable);
@@ -359,7 +358,6 @@ public interface IBranchLogisticsOperations
     Task<KitchenRequestSnapshot> CreateKitchenRequestAsync(CreateKitchenRequestCommand command, bool submit, CancellationToken cancellationToken = default);
     Task<KitchenRequestSnapshot> SubmitKitchenRequestAsync(Guid requestId, int expectedVersion, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<IncomingShipmentSnapshot>> GetIncomingShipmentsAsync(CancellationToken cancellationToken = default);
-    Task<IncomingShipmentSnapshot> CreateSyntheticDemoShipmentAsync(Guid commandId, CancellationToken cancellationToken = default);
     Task<IncomingReceiptResult> ReceiveShipmentAsync(ReceiveShipmentCommand command, CancellationToken cancellationToken = default);
     Task<ManualIncomingResult> PostManualIncomingAsync(PostManualIncomingCommand command, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<KitchenReturnSnapshot>> GetKitchenReturnsAsync(CancellationToken cancellationToken = default);

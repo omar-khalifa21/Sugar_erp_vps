@@ -19,7 +19,7 @@ coverage
 SugarERP_4Chat_Pack.zip
 reports
 backups
-releases
+/releases
 installers/**/artifacts
 installers/**/staging
 *.dump

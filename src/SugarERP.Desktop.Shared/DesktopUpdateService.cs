@@ -8,6 +8,7 @@ namespace SugarERP.Desktop.Shared;
 
 public sealed record DesktopReleaseManifest(
     [property: JsonPropertyName("profile")] string Profile,
+    [property: JsonPropertyName("channel")] string Channel,
     [property: JsonPropertyName("version")] string Version,
     [property: JsonPropertyName("filename")] string Filename,
     [property: JsonPropertyName("publishedAt")] DateTimeOffset PublishedAt,
@@ -36,6 +37,8 @@ public sealed class DesktopUpdateService(HttpClient http, DeploymentConfiguratio
         };
         if (!string.Equals(release.Profile, expectedProfile, StringComparison.Ordinal))
             throw new InvalidDataException("The update manifest is for another application type.");
+        if (!string.Equals(release.Channel, "production", StringComparison.Ordinal))
+            throw new InvalidDataException("Only production releases can be installed.");
         if (!Version.TryParse(configuration.Version, out var installed) || !Version.TryParse(release.Version, out var available))
             throw new InvalidDataException("The installed or available version is invalid.");
         var update = available > installed;

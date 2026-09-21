@@ -59,8 +59,6 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
 .secondary-button { background: #f0efff; color: var(--primary); }
 .login-button { width: 100%; margin-top: 26px; }
 .form-error { display: flex; align-items: center; gap: 8px; color: #a6293d; background: #fff0f2; padding: 11px 13px; border-radius: 10px; font-size: .88rem; }
-.demo-note { margin-top: 20px; padding: 14px; display: grid; grid-template-columns: 1fr auto auto; gap: 10px; border: 1px dashed #ccd0dd; border-radius: 12px; color: var(--muted); font-size: .8rem; direction: ltr; }
-.demo-note strong { direction: rtl; }
 .mobile-brand { display: none; align-items: center; gap: 12px; margin-bottom: 32px; }
 
 .admin-shell { min-height: 100vh; }
@@ -258,7 +256,6 @@ td strong { color: var(--ink); }
   .status-ribbon button svg { width: 22px; height: 22px; }
   .data-waiting { align-items: flex-start; flex-direction: column; }
   .site-card dl { grid-template-columns: 1fr; }
-  .demo-note { grid-template-columns: 1fr; }
 }
 
 /* Cupcake theme: calm white surfaces, soft pink focus and progressive detail. */

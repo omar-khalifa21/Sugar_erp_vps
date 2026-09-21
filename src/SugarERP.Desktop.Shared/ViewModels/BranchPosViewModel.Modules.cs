@@ -14,7 +14,6 @@ public sealed partial class BranchPosViewModel
     private readonly IShiftReportWriter _shiftReportWriter;
     private AsyncRelayCommand _saveRequestDraftCommand = null!;
     private AsyncRelayCommand _submitRequestCommand = null!;
-    private AsyncRelayCommand _createDemoShipmentCommand = null!;
     private AsyncRelayCommand _receiveShipmentCommand = null!;
     private AsyncRelayCommand _postManualIncomingCommand = null!;
     private AsyncRelayCommand _refundSaleCommand = null!;
@@ -262,7 +261,6 @@ public sealed partial class BranchPosViewModel
     public bool IsCloseStep4 => CloseStep == 4;
     public string CloseStepText => $"الخطوة {CloseStep} من 4";
 
-    public bool CanCreateDemoShipment => IsDemo;
     public bool HasIncomingShipments
     {
         get => _hasIncomingShipments;
@@ -272,7 +270,6 @@ public sealed partial class BranchPosViewModel
     public ICommand SaveRequestDraftCommand => _saveRequestDraftCommand;
     public ICommand SubmitRequestCommand => _submitRequestCommand;
     public ICommand AddRequestLineCommand => _addRequestLineCommand;
-    public ICommand CreateDemoShipmentCommand => _createDemoShipmentCommand;
     public ICommand ReceiveShipmentCommand => _receiveShipmentCommand;
     public ICommand PostManualIncomingCommand => _postManualIncomingCommand;
     public ICommand RefundSaleCommand => _refundSaleCommand;
@@ -300,7 +297,6 @@ public sealed partial class BranchPosViewModel
         _addReturnLineCommand = new RelayCommand<QuantityEntryRowViewModel>(row => Increment(row));
         _saveRequestDraftCommand = new AsyncRelayCommand(() => SaveRequestAsync(false), () => !IsBusy);
         _submitRequestCommand = new AsyncRelayCommand(SubmitRequestAsync, () => !IsBusy);
-        _createDemoShipmentCommand = new AsyncRelayCommand(CreateDemoShipmentAsync, () => IsDemo && !IsBusy);
         _receiveShipmentCommand = new AsyncRelayCommand(ReceiveShipmentAsync, () => SelectedIncoming?.Snapshot.IsReceivable == true && !IsBusy);
         _postManualIncomingCommand = new AsyncRelayCommand(PostManualIncomingAsync, () => IsShiftOpen && !IsBusy);
         _refundSaleCommand = new AsyncRelayCommand(RefundSaleAsync, () => !IsBusy);
@@ -328,7 +324,6 @@ public sealed partial class BranchPosViewModel
         if (_saveRequestDraftCommand is null) return;
         _saveRequestDraftCommand.NotifyCanExecuteChanged();
         _submitRequestCommand.NotifyCanExecuteChanged();
-        _createDemoShipmentCommand.NotifyCanExecuteChanged();
         _receiveShipmentCommand.NotifyCanExecuteChanged();
         _postManualIncomingCommand.NotifyCanExecuteChanged();
         _refundSaleCommand.NotifyCanExecuteChanged();
@@ -700,29 +695,6 @@ public sealed partial class BranchPosViewModel
         catch (BusinessRuleException exception) { IncomingStatusText = exception.UserMessage; }
         catch { IncomingStatusText = "تعذر حفظ الوارد اليدوي. لم تتغير الكميات."; }
         finally { IsBusy = false; }
-    }
-
-    private async Task CreateDemoShipmentAsync()
-    {
-        IsBusy = true;
-        try
-        {
-            await _moduleOperations.CreateSyntheticDemoShipmentAsync(Guid.NewGuid());
-            await LoadIncomingAsync();
-            IncomingStatusText = "تم تنزيل شحنة تجريبية مرتبطة بطلب وارد مرسل. أدخل العد الفعلي ثم أكد.";
-        }
-        catch (BusinessRuleException exception)
-        {
-            IncomingStatusText = exception.UserMessage;
-        }
-        catch (Exception)
-        {
-            IncomingStatusText = "تعذر تجهيز الشحنة التجريبية.";
-        }
-        finally
-        {
-            IsBusy = false;
-        }
     }
 
     private void PopulateIncomingCounts(IncomingShipmentSnapshot? shipment)

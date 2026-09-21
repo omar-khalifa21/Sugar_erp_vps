@@ -24,6 +24,6 @@
     "typecheck": "npm run typecheck --workspace @sugar-erp/server",
     "prisma:generate": "npm run prisma:generate --workspace @sugar-erp/server",
     "prisma:migrate:deploy": "npm run prisma:migrate:deploy --workspace @sugar-erp/server",
-    "seed:dev": "npm run seed:dev --workspace @sugar-erp/server"
+    "bootstrap:admin": "npm run bootstrap:admin --workspace @sugar-erp/server"
   }
 }

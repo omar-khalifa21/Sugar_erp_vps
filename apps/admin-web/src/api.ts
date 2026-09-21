@@ -280,10 +280,10 @@ export const api = {
     }),
   signup: (input: { username: string; displayName: string; password: string }) =>
     request<{ status: 'PENDING_PERMISSION' }>('/auth/signup', { method: 'POST', body: JSON.stringify(input) }),
-  branchOneRelease: (token: string) => request<{ version: string; filename: string; publishedAt: string; sha256: string; size: number; releaseNotes?: string }>('/releases/branch-type-1/current', {}, token),
-  branchOneTouchRelease: (token: string) => request<{ version: string; filename: string; publishedAt: string; sha256: string; size: number; releaseNotes?: string }>('/releases/branch-type-1/touch/current', {}, token),
-  kitchenRelease: (token: string) => request<{ version: string; filename: string; publishedAt: string; sha256: string; size: number; releaseNotes?: string }>('/releases/kitchen/current', {}, token),
-  branchTwoRelease: (token: string) => request<{ version: string; filename: string; publishedAt: string; sha256: string; size: number; releaseNotes?: string }>('/releases/branch-type-2/current', {}, token),
+  branchOneRelease: (token: string) => request<{ channel: 'production'; version: string; filename: string; publishedAt: string; sha256: string; size: number; releaseNotes?: string }>('/releases/branch-type-1/current', {}, token),
+  branchOneTouchRelease: (token: string) => request<{ channel: 'production'; version: string; filename: string; publishedAt: string; sha256: string; size: number; releaseNotes?: string }>('/releases/branch-type-1/touch/current', {}, token),
+  kitchenRelease: (token: string) => request<{ channel: 'production'; version: string; filename: string; publishedAt: string; sha256: string; size: number; releaseNotes?: string }>('/releases/kitchen/current', {}, token),
+  branchTwoRelease: (token: string) => request<{ channel: 'production'; version: string; filename: string; publishedAt: string; sha256: string; size: number; releaseNotes?: string }>('/releases/branch-type-2/current', {}, token),
   downloadBranchOne: (token: string, variant: 'desktop' | 'touch' = 'desktop', onProgress?: (percent: number) => void, signal?: AbortSignal) =>
     downloadInstaller(`/releases/branch-type-1${variant === 'touch' ? '/touch' : ''}/current/download`, token, onProgress, signal),
   downloadKitchen: (token: string, onProgress?: (percent: number) => void, signal?: AbortSignal) =>

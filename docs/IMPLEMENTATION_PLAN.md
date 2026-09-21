@@ -23,7 +23,7 @@ Delivered the Arabic RTL React admin surface and the first frozen synchronizatio
 
 Dependencies: completed VPS foundation and its migration conventions.
 
-Acceptance evidence: the responsive site builds and runs at `http://localhost:4173`; API requests reach the real PostgreSQL container; all current demo items have prices; customer price changes do not rewrite invoice-line price snapshots; identical event replay ten times remains idempotent; same ID/different hash, sequence gaps, and missing dependencies are rejected correctly; unit, type, lint, production builds, and seven PostgreSQL integration tests pass.
+Acceptance evidence: the responsive site builds and runs at `http://localhost:4173`; API requests reach the real PostgreSQL container; all test catalog items have prices; customer price changes do not rewrite invoice-line price snapshots; identical event replay ten times remains idempotent; same ID/different hash, sequence gaps, and missing dependencies are rejected correctly; unit, type, lint, production builds, and seven PostgreSQL integration tests pass.
 
 ## Current milestone — Branch Type 1 runnable Avalonia slice (In progress)
 

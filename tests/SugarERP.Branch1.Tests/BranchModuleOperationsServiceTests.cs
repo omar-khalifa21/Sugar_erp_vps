@@ -91,7 +91,7 @@ public sealed class BranchModuleOperationsServiceTests
     {
         await using var store = await ModuleTestStore.CreateAsync();
         var shift = await store.Operations.OpenShiftAsync(ShiftKind.Morning, 0);
-        var shipment = await CreateDemoShipmentAsync(store.Modules);
+        var shipment = await CreateIncomingShipmentAsync(store.Database, store.Modules);
         var before = await ReadBalancesAsync(store.Database, shipment.Lines.Select(value => value.ItemId));
         var command = new ReceiveShipmentCommand(
             Guid.NewGuid(),
@@ -131,7 +131,7 @@ public sealed class BranchModuleOperationsServiceTests
     {
         await using var store = await ModuleTestStore.CreateAsync();
         var shift = await store.Operations.OpenShiftAsync(ShiftKind.Morning, 0);
-        var shipment = await CreateDemoShipmentAsync(store.Modules);
+        var shipment = await CreateIncomingShipmentAsync(store.Database, store.Modules);
         Assert.True(shipment.Lines.Count >= 2);
         var before = await ReadBalancesAsync(store.Database, shipment.Lines.Select(value => value.ItemId));
         var mismatchedLine = shipment.Lines[^1];
@@ -222,14 +222,14 @@ public sealed class BranchModuleOperationsServiceTests
         var original = await store.Modules.GetSaleAsync(sale.Id);
         var gateaux = original.Lines.Single(value => value.ItemId == ChocolateGateauxId);
         var firstCommand = new CorrectSaleCommand(
-            Guid.NewGuid(), sale.Id, gateaux.Id, 1, true, "مرتجع سليم", PaymentMethod.Cash, "demo-user");
+            Guid.NewGuid(), sale.Id, gateaux.Id, 1, true, "مرتجع سليم", PaymentMethod.Cash, "test-user");
 
         var first = await store.Modules.CorrectSaleAsync(firstCommand);
         var replay = await store.Modules.CorrectSaleAsync(firstCommand);
         var second = await store.Modules.CorrectSaleAsync(new CorrectSaleCommand(
-            Guid.NewGuid(), sale.Id, gateaux.Id, 3, false, "مرتجع تالف", PaymentMethod.Visa, "demo-user"));
+            Guid.NewGuid(), sale.Id, gateaux.Id, 3, false, "مرتجع تالف", PaymentMethod.Visa, "test-user"));
         var exception = await Assert.ThrowsAsync<BusinessRuleException>(() => store.Modules.CorrectSaleAsync(
-            new CorrectSaleCommand(Guid.NewGuid(), sale.Id, gateaux.Id, 1, true, "محاولة زائدة", PaymentMethod.Cash, "demo-user")));
+            new CorrectSaleCommand(Guid.NewGuid(), sale.Id, gateaux.Id, 1, true, "محاولة زائدة", PaymentMethod.Cash, "test-user")));
 
         Assert.True(replay.WasAlreadyCommitted);
         Assert.Equal(first.CorrectionId, replay.CorrectionId);
@@ -513,14 +513,49 @@ public sealed class BranchModuleOperationsServiceTests
         Assert.Equal(written.Sha256, historyShift.ReportHash);
     }
 
-    private static async Task<IncomingShipmentSnapshot> CreateDemoShipmentAsync(BranchModuleOperationsService modules)
+    private static async Task<IncomingShipmentSnapshot> CreateIncomingShipmentAsync(LocalDatabase database, BranchModuleOperationsService modules)
     {
-        await modules.CreateKitchenRequestAsync(
+        var requestSnapshot = await modules.CreateKitchenRequestAsync(
             new CreateKitchenRequestCommand(
                 Guid.NewGuid(),
                 [new QuantityInput(ChocolateCakeId, 3), new QuantityInput(ChocolateGateauxId, 5)]),
             submit: true);
-        return await modules.CreateSyntheticDemoShipmentAsync(Guid.NewGuid());
+        await using var db = database.CreateContext();
+        var request = await db.KitchenRequests.Include(value => value.Lines).SingleAsync(value => value.Id == requestSnapshot.Id);
+        var shipment = new Shipment
+        {
+            Id = Guid.NewGuid(),
+            CommandId = Guid.NewGuid(),
+            RequestId = request.Id,
+            Reference = "TEST-INCOMING-001",
+            Status = ShipmentStatus.AwaitingReceipt,
+            Version = 1,
+            DispatchedAtUtc = DateTimeOffset.UtcNow
+        };
+        var requestLines = request.Lines.OrderBy(value => value.ItemId).ToArray();
+        for (var index = 0; index < requestLines.Length; index += 1)
+        {
+            var requestLine = requestLines[index];
+            var sent = index == 1 ? Math.Min(2L * requestLine.QuantityScale, requestLine.RequestedScaled) : requestLine.RequestedScaled;
+            shipment.Lines.Add(new ShipmentLine
+            {
+                Id = Guid.NewGuid(),
+                ShipmentId = shipment.Id,
+                RequestLineId = requestLine.Id,
+                ItemId = requestLine.ItemId,
+                NameSnapshot = requestLine.NameSnapshot,
+                UnitSnapshot = requestLine.UnitSnapshot,
+                QuantityScale = requestLine.QuantityScale,
+                SentScaled = sent
+            });
+            requestLine.ApprovedScaled = requestLine.RequestedScaled;
+            requestLine.SentScaled = sent;
+        }
+        request.Status = KitchenRequestStatus.Partial;
+        request.Version += 1;
+        db.Shipments.Add(shipment);
+        await db.SaveChangesAsync();
+        return (await modules.GetIncomingShipmentsAsync()).Single(value => value.Id == shipment.Id);
     }
 
     private static async Task<Dictionary<Guid, long>> ReadBalancesAsync(LocalDatabase database, IEnumerable<Guid> itemIds)
@@ -563,7 +598,7 @@ public sealed class BranchModuleOperationsServiceTests
             Directory.CreateDirectory(directory);
             var store = new ModuleTestStore(directory);
             await store.Operations.InitializeAsync();
-            await store.Operations.SeedSyntheticDemoAsync();
+            await BranchTestFixtureSeeder.SeedAsync(store.Database);
             return store;
         }
 

@@ -73,7 +73,6 @@ public interface IBranchOperations
 {
     Task InitializeAsync(CancellationToken cancellationToken = default);
     Task<BranchSnapshot> GetSnapshotAsync(CancellationToken cancellationToken = default);
-    Task SeedSyntheticDemoAsync(CancellationToken cancellationToken = default);
     Task<OpenShiftSnapshot> OpenShiftAsync(ShiftKind kind, long openingCashMinor, CancellationToken cancellationToken = default);
     Task<SaleReceipt> CompleteSaleAsync(CompleteSaleCommand command, CancellationToken cancellationToken = default);
     Task SaveEnrollmentAsync(EnrollmentCommand command, EnrollmentResult result, CancellationToken cancellationToken = default);

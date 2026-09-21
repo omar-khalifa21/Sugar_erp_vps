@@ -225,7 +225,6 @@ public sealed class Shipment
     public ShipmentStatus Status { get; set; } = ShipmentStatus.Dispatched;
     public int Version { get; set; } = 1;
     public DateTimeOffset DispatchedAtUtc { get; set; }
-    public bool SyntheticDemo { get; set; }
     public ICollection<ShipmentLine> Lines { get; set; } = [];
     public IncomingReceipt? Receipt { get; set; }
 }

@@ -182,7 +182,7 @@ function LoginScreen({ onSignIn }: { onSignIn: (token: string, status: string) =
               <a href="/api/v1/releases/branch-type-2/current/download"><Download size={16} /> فرع نوع ٢</a>
               <a href="/api/v1/releases/kitchen/current/download"><Download size={16} /> المطبخ</a>
             </div>
-            <small>الإصدار الحالي 1.0.0 · Windows x64</small>
+            <small>إصدار إنتاج فقط · Windows x64</small>
           </div>
         </div>
         <div className="login-status"><ShieldCheck size={20} /> اتصال HTTPS مشفّر بخادم Sugar ERP</div>
@@ -208,13 +208,6 @@ function LoginScreen({ onSignIn }: { onSignIn: (token: string, status: string) =
             {busy ? <><RefreshCw className="spin" size={19} /> جارٍ التنفيذ</> : <>{signingUp ? 'إنشاء حساب' : 'دخول آمن'} <ChevronLeft size={19} /></>}
           </button>
           <button type="button" className="secondary-button" onClick={() => { setSigningUp(!signingUp); setError(''); setNotice(''); setPassword(''); }}>{signingUp ? 'لديك حساب؟ سجّل الدخول' : 'ليس لديك حساب؟ أنشئ حساباً'}</button>
-          {import.meta.env.DEV && (
-            <div className="demo-note">
-              <strong>بيانات العرض المحلي</strong>
-              <span>admin</span>
-              <span>SugarAdmin2026!</span>
-            </div>
-          )}
         </form>
       </section>
     </main>

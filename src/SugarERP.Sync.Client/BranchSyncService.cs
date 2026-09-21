@@ -62,7 +62,7 @@ public sealed class BranchSyncService(HttpClient httpClient, LocalDatabase datab
                 .Select(value => value.Cursor)
                 .SingleOrDefaultAsync(cancellationToken);
         }
-        if (configuration is null || DeviceCredentialProtector.IsDemo(configuration.DeviceCredential)) return pushed;
+        if (configuration is null) return pushed;
 
         try
         {
@@ -131,24 +131,10 @@ public sealed class BranchSyncService(HttpClient httpClient, LocalDatabase datab
         var configuration = await db.DeviceConfigurations.AsNoTracking().SingleOrDefaultAsync(cancellationToken);
         if (configuration is null) return new SyncRunResult(0, 0, 0, "سجّل الجهاز أولاً قبل المزامنة.", false);
 
-        // Demo enrollment is deliberately local-only. Keep this check before endpoint
-        // construction, credential unprotection, and any use of HttpClient.
-        if (DeviceCredentialProtector.IsDemo(configuration.DeviceCredential))
-        {
-            var demoRemaining = await RemainingAsync(db, cancellationToken);
-            return new SyncRunResult(
-                0,
-                0,
-                demoRemaining,
-                "هذا عرض محلي يعمل دون اتصال بالخادم. الحركات محفوظة على هذا الجهاز ولن تُرسل من وضع العرض.",
-                false);
-        }
-
         var now = DateTimeOffset.UtcNow;
         // Versions before the Kitchen cafe-order fix permanently rejected these event types
         // as WRONG_PROFILE. Re-open only that known server-side misclassification so real,
-        // already-created records can reach the server after an upgrade. Demo devices have
-        // already returned above and never enter this recovery path.
+        // already-created records can reach the server after an upgrade.
         var recoverableWrongProfileEvents = await db.OutboxMessages
             .Where(value => value.State == OutboxState.Failed
                 && value.LastErrorCode == "WRONG_PROFILE"

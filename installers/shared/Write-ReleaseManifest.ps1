@@ -12,6 +12,7 @@ $ErrorActionPreference = 'Stop'
 $signature = Get-AuthenticodeSignature -LiteralPath $Artifact
 if ($signature.Status -ne 'Valid' -and -not $AllowUnsignedInternal) { throw "Production manifest refused: Authenticode signature is $($signature.Status)." }
 $manifest = [ordered]@{
+    channel = 'production'
     version = $Version
     filename = (Split-Path -Leaf $Artifact)
     publishedAt = [DateTimeOffset]::UtcNow.ToString('O')

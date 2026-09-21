@@ -36,19 +36,16 @@ public sealed partial class App : Avalonia.Application
                 _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
                 var enrollment = new EnrollmentClient(_httpClient);
                 var sync = new BranchSyncService(_httpClient, database);
-                var viewModel = new BranchPosViewModel(operations, moduleOperations, shiftReportWriter, printer, enrollment, sync, options.IsDemo,
+                var viewModel = new BranchPosViewModel(operations, moduleOperations, shiftReportWriter, printer, enrollment, sync,
                     DeploymentConfiguration.Create(DesktopApplicationType.BranchType1).Version);
-                desktop.MainWindow = new MainWindow(viewModel, database, _httpClient, options.IsDemo, options.IsTouch);
-                if (!options.IsDemo)
+                desktop.MainWindow = new MainWindow(viewModel, database, _httpClient, options.IsTouch);
+                _backgroundSync = new BackgroundSyncLoop(sync, TimeSpan.FromSeconds(15));
+                desktop.MainWindow.Opened += (_, _) => _backgroundSync.Start();
+                desktop.Exit += async (_, _) =>
                 {
-                    _backgroundSync = new BackgroundSyncLoop(sync, TimeSpan.FromSeconds(15));
-                    desktop.MainWindow.Opened += (_, _) => _backgroundSync.Start();
-                    desktop.Exit += async (_, _) =>
-                    {
-                        if (_backgroundSync is not null) await _backgroundSync.DisposeAsync();
-                        _httpClient?.Dispose();
-                    };
-                }
+                    if (_backgroundSync is not null) await _backgroundSync.DisposeAsync();
+                    _httpClient?.Dispose();
+                };
             }
         }
 

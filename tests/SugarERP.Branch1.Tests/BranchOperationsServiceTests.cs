@@ -18,7 +18,7 @@ public sealed class BranchOperationsServiceTests
     [Fact]
     public async Task InitializeAsync_AppliesInitialMigrationAndRequiredConnectionPragmas()
     {
-        await using var store = await TestStore.CreateAsync(seedDemo: false);
+        await using var store = await TestStore.CreateAsync(seedFixtures: false);
         await store.Database.InitializeAsync();
 
         Assert.True(File.Exists(store.Database.DatabasePath));
@@ -79,25 +79,19 @@ public sealed class BranchOperationsServiceTests
     }
 
     [Fact]
-    public async Task SeedSyntheticDemoAsync_IsRepeatableAndCreatesExpectedLocalFixtures()
+    public async Task InitializeAsync_DoesNotSeedOperationalData()
     {
-        await using var store = await TestStore.CreateAsync(seedDemo: false);
-
-        await store.Operations.SeedSyntheticDemoAsync();
-        await store.Operations.SeedSyntheticDemoAsync();
+        await using var store = await TestStore.CreateAsync(seedFixtures: false);
 
         var snapshot = await store.Operations.GetSnapshotAsync();
-        Assert.NotNull(snapshot.Configuration);
-        Assert.Equal(DeviceProfile.BranchType1, snapshot.Configuration.Profile);
-        Assert.Equal(6, snapshot.Items.Count);
-        Assert.Equal(18, snapshot.Items.Single(item => item.Id == ChocolateCakeId).QuantityScaled);
-        Assert.Equal(46, snapshot.Items.Single(item => item.Id == ChocolateGateauxId).QuantityScaled);
+        Assert.Null(snapshot.Configuration);
+        Assert.Empty(snapshot.Items);
 
         await using var db = store.Database.CreateContext();
-        Assert.Equal(6, await db.CatalogItems.CountAsync());
-        Assert.Equal(6, await db.StockBalances.CountAsync());
-        Assert.Equal(6, await db.StockMovements.CountAsync());
-        Assert.Equal(1, await db.SequenceStates.CountAsync());
+        Assert.Empty(await db.CatalogItems.ToListAsync());
+        Assert.Empty(await db.StockBalances.ToListAsync());
+        Assert.Empty(await db.StockMovements.ToListAsync());
+        Assert.Empty(await db.SequenceStates.ToListAsync());
     }
 
     [Fact]
@@ -333,13 +327,13 @@ public sealed class BranchOperationsServiceTests
 
         public BranchOperationsService Operations { get; }
 
-        public static async Task<TestStore> CreateAsync(bool seedDemo = true)
+        public static async Task<TestStore> CreateAsync(bool seedFixtures = true)
         {
             var directory = Path.Combine(Path.GetTempPath(), "sugar-erp-branch1-tests", Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(directory);
             var store = new TestStore(directory);
             await store.Operations.InitializeAsync();
-            if (seedDemo) await store.Operations.SeedSyntheticDemoAsync();
+            if (seedFixtures) await BranchTestFixtureSeeder.SeedAsync(store.Database);
             return store;
         }
 
