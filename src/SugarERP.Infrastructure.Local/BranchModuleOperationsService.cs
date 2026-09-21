@@ -1953,6 +1953,18 @@ public sealed class BranchModuleOperationsService(LocalDatabase database) : IBra
             job.State = SideEffectState.Completed;
             job.CompletedAtUtc = DateTimeOffset.UtcNow;
             job.LastError = null;
+            var uploadJob = await db.SideEffectJobs.SingleOrDefaultAsync(
+                value => value.SourceId == job.SourceId
+                    && value.Kind == SideEffectKind.UploadShiftReport
+                    && value.DocumentVersion == job.DocumentVersion,
+                cancellationToken);
+            if (uploadJob is not null && uploadJob.State != SideEffectState.Completed)
+            {
+                uploadJob.State = SideEffectState.Pending;
+                uploadJob.NextAttemptAtUtc = DateTimeOffset.UtcNow;
+                uploadJob.LastError = null;
+                uploadJob.CompletedAtUtc = null;
+            }
             await db.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
         }

@@ -16,6 +16,7 @@ import { EnrollmentModule } from './enrollment/enrollment.module';
 import { SyncModule } from './sync/sync.module';
 import { AdminModule } from './admin/admin.module';
 import { ReleasesModule } from './releases/releases.module';
+import { ReportsModule } from './reports/reports.module';
 
 function validateEnvironment(config: Record<string, unknown>): Record<string, unknown> {
   if (!config.DATABASE_URL) throw new Error('DATABASE_URL is required');
@@ -44,6 +45,7 @@ function validateEnvironment(config: Record<string, unknown>): Record<string, un
     SyncModule,
     AdminModule,
     ReleasesModule,
+    ReportsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: JwtAuthGuard },

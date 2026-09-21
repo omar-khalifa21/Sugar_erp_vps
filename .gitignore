@@ -12,7 +12,7 @@ coverage/
 *.tsbuildinfo
 postgres-data/
 uploads/
-reports/
+/reports/
 backups/
 /releases/
 *.dump

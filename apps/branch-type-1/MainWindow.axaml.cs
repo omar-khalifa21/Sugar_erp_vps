@@ -55,7 +55,9 @@ public sealed partial class MainWindow : Window
         {
             await using var db = _database!.CreateContext();
             if (await db.Shifts.AnyAsync(x => x.Status == ShiftStatus.Open)) throw new InvalidOperationException("Close the shift before updating.");
-            if (await db.OutboxMessages.AnyAsync(x => x.State != OutboxState.Acknowledged)) throw new InvalidOperationException("The update is waiting for all saved changes to synchronize.");
+            var pendingSync = await db.OutboxMessages.AnyAsync(x => x.State != OutboxState.Acknowledged)
+                || await db.SideEffectJobs.AnyAsync(x => x.Kind == SideEffectKind.UploadShiftReport && x.State != SideEffectState.Completed);
+            if (pendingSync) throw new InvalidOperationException("The update is waiting for all saved changes and shift reports to synchronize.");
             this.FindControl<Button>("UpdateButton")!.Content = "Downloading update...";
             var path = await new DesktopUpdateService(_http!, _deployment).DownloadAndVerifyAsync(_availableUpdate,
                 new Progress<double>(x => this.FindControl<Button>("UpdateButton")!.Content = $"Downloading — {x:P0}"));

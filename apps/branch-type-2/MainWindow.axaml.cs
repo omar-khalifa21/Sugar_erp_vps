@@ -171,7 +171,9 @@ public sealed partial class MainWindow : Window
             await _service.SyncAsync();
             await using var db = _service.Database.CreateContext();
             if (await db.Shifts.AnyAsync(x => x.Status == ShiftStatus.Open)) throw new BusinessRuleException("UPDATE_BLOCKED", "أغلق الوردية قبل التحديث.");
-            if (await db.OutboxMessages.AnyAsync(x => x.State != OutboxState.Acknowledged)) throw new BusinessRuleException("UPDATE_BLOCKED", "التحديث ينتظر إرسال كل العمليات المحفوظة.");
+            var pendingSync = await db.OutboxMessages.AnyAsync(x => x.State != OutboxState.Acknowledged)
+                || await db.SideEffectJobs.AnyAsync(x => x.Kind == SideEffectKind.UploadShiftReport && x.State != SideEffectState.Completed);
+            if (pendingSync) throw new BusinessRuleException("UPDATE_BLOCKED", "التحديث ينتظر إرسال كل العمليات وتقارير الورديات المحفوظة.");
             Control<TextBlock>("Status").Text = "Downloading update...";
             var updater = new DesktopUpdateService(_updateHttp, _deployment);
             var path = await updater.DownloadAndVerifyAsync(_availableUpdate, new Progress<double>(x => Control<TextBlock>("Status").Text = $"Downloading update — {x:P0}"));

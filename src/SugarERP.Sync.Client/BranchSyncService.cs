@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.EntityFrameworkCore;
@@ -87,14 +88,17 @@ public sealed class BranchSyncService(HttpClient httpClient, LocalDatabase datab
                 pageCount += 1;
             } while (hasMore && pageCount < 25);
 
+            var reportUploads = await UploadPendingReportsAsync(connection, cancellationToken);
             await using var finalDb = database.CreateContext();
-            var remaining = await RemainingAsync(finalDb, cancellationToken);
+            var remaining = await RemainingAsync(finalDb, cancellationToken) + reportUploads.Remaining;
             var message = hasMore
                 ? $"تم تنزيل {received} تحديث. توجد صفحات أخرى وستستكمل في المزامنة التالية."
-                : pushed.Succeeded
-                    ? $"اكتملت المزامنة: رُفع {pushed.Acknowledged} ونزل {received} تحديث."
+                : pushed.Succeeded && reportUploads.Succeeded
+                    ? $"اكتملت المزامنة: رُفع {pushed.Acknowledged} ونزل {received} تحديث، ورُفع {reportUploads.Uploaded} تقرير."
+                    : !reportUploads.Succeeded
+                        ? $"اكتملت مزامنة الحركات، لكن بقي تقرير وردية للرفع: {reportUploads.Message}"
                     : $"نزل {received} تحديث. ما زالت بعض الحركات المحلية بانتظار الرفع: {pushed.UserMessage}";
-            return new SyncRunResult(pushed.Sent, pushed.Acknowledged, remaining, message, pushed.Succeeded && !hasMore, received);
+            return new SyncRunResult(pushed.Sent, pushed.Acknowledged, remaining, message, pushed.Succeeded && reportUploads.Succeeded && !hasMore, received);
         }
         catch (CentralApiException exception)
         {
@@ -125,6 +129,97 @@ public sealed class BranchSyncService(HttpClient httpClient, LocalDatabase datab
         }
     }
 
+    private async Task<ReportUploadRun> UploadPendingReportsAsync(
+        DeviceConnection connection,
+        CancellationToken cancellationToken)
+    {
+        var uploaded = 0;
+        for (var index = 0; index < 10; index++)
+        {
+            await using var db = database.CreateContext();
+            var now = DateTimeOffset.UtcNow;
+            var job = await db.SideEffectJobs
+                .Where(value => value.Kind == SideEffectKind.UploadShiftReport
+                    && value.State != SideEffectState.Completed
+                    && value.State != SideEffectState.Failed
+                    && value.NextAttemptAtUtc <= now)
+                .OrderBy(value => value.CreatedAtUtc)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (job is null) break;
+            var artifact = await db.ReportArtifacts.SingleOrDefaultAsync(
+                value => value.ShiftId == job.SourceId && value.ReportVersion == job.DocumentVersion,
+                cancellationToken);
+            if (artifact is null) break;
+            var shift = await db.Shifts.AsNoTracking().SingleAsync(value => value.Id == job.SourceId, cancellationToken);
+            job.State = SideEffectState.Running;
+            job.Attempts += 1;
+            await db.SaveChangesAsync(cancellationToken);
+            try
+            {
+                if (!File.Exists(artifact.LocalPath)) throw new InvalidDataException("REPORT_FILE_MISSING");
+                var bytes = await File.ReadAllBytesAsync(artifact.LocalPath, cancellationToken);
+                var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
+                if (bytes.LongLength != artifact.ByteLength || !string.Equals(hash, artifact.ContentHash, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("REPORT_FILE_CHANGED");
+                var response = await new CentralApiClient(httpClient).UploadShiftReportAsync(
+                    connection,
+                    shift.Id,
+                    artifact.ReportVersion,
+                    shift.BusinessDate,
+                    shift.Kind == ShiftKind.Morning ? "MORNING" : "EVENING",
+                    Path.GetFileName(artifact.LocalPath),
+                    artifact.ContentHash,
+                    bytes,
+                    cancellationToken);
+                job.State = SideEffectState.Completed;
+                job.CompletedAtUtc = response.UploadedAt;
+                job.LastError = null;
+                artifact.UploadedAtUtc = response.UploadedAt;
+                artifact.Error = null;
+                uploaded += 1;
+            }
+            catch (CentralApiException exception)
+            {
+                job.LastError = exception.Code;
+                artifact.Error = exception.Code;
+                if (exception.Retryable || exception.StatusCode == 404)
+                {
+                    job.State = SideEffectState.Pending;
+                    job.NextAttemptAtUtc = now.AddSeconds(ReportRetrySeconds(job.Attempts));
+                }
+                else
+                {
+                    job.State = SideEffectState.Failed;
+                }
+            }
+            catch (Exception exception) when (exception is HttpRequestException || exception is TaskCanceledException && !cancellationToken.IsCancellationRequested)
+            {
+                job.State = SideEffectState.Pending;
+                job.LastError = exception is TaskCanceledException ? "REPORT_UPLOAD_TIMEOUT" : "REPORT_UPLOAD_OFFLINE";
+                artifact.Error = job.LastError;
+                job.NextAttemptAtUtc = now.AddSeconds(ReportRetrySeconds(job.Attempts));
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
+            {
+                job.State = SideEffectState.Failed;
+                job.LastError = exception.Message;
+                artifact.Error = exception.Message;
+            }
+            await db.SaveChangesAsync(cancellationToken);
+            if (job.State != SideEffectState.Completed) break;
+        }
+
+        await using var resultDb = database.CreateContext();
+        var remaining = await resultDb.SideEffectJobs.CountAsync(
+            value => value.Kind == SideEffectKind.UploadShiftReport && value.State != SideEffectState.Completed,
+            cancellationToken);
+        return new ReportUploadRun(uploaded, remaining, remaining == 0,
+            remaining == 0 ? "تم رفع كل التقارير." : "سيعاد رفع التقرير تلقائياً بعد الحفاظ على نسخته المحلية.");
+    }
+
+    private static double ReportRetrySeconds(int attempts) =>
+        Math.Min(300, Math.Pow(2, Math.Min(attempts, 8)));
+
     public async Task<SyncRunResult> PushPendingAsync(CancellationToken cancellationToken = default)
     {
         await using var db = database.CreateContext();
@@ -140,7 +235,10 @@ public sealed class BranchSyncService(HttpClient httpClient, LocalDatabase datab
                 && value.LastErrorCode == "WRONG_PROFILE"
                 && (value.EventType == "custom_order.created"
                     || value.EventType == "custom_order.status_changed"
-                    || value.EventType == "custom_customer.payment_recorded"))
+                    || value.EventType == "custom_customer.payment_recorded"
+                    || value.EventType == "cafe_customer.created"
+                    || value.EventType == "cafe_customer.price_list_updated"
+                    || value.EventType == "cafe_customer.archived"))
             .ToListAsync(cancellationToken);
         if (recoverableWrongProfileEvents.Count > 0)
         {
@@ -494,6 +592,8 @@ public sealed class BranchSyncService(HttpClient httpClient, LocalDatabase datab
         [JsonPropertyName("results")]
         public PushResult[]? Results { get; init; } = [];
     }
+
+    private sealed record ReportUploadRun(int Uploaded, int Remaining, bool Succeeded, string Message);
 
     private sealed class PushResult
     {

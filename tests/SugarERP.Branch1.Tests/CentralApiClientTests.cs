@@ -16,6 +16,8 @@ public sealed class CentralApiClientTests
         var deviceId = Guid.NewGuid();
         var siteId = Guid.NewGuid();
         var eventId = Guid.NewGuid();
+        var shiftId = Guid.NewGuid();
+        var reportId = Guid.NewGuid();
         var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath switch
         {
             "/api/v1/health" or "/api/v1/ready" => Json(HttpStatusCode.OK, "{}"),
@@ -30,6 +32,9 @@ public sealed class CentralApiClientTests
                 """),
             "/api/v1/sync/ack" => Json(HttpStatusCode.OK, """
                 {"acknowledged":true,"server_position":"10"}
+                """),
+            "/api/v1/reports/upload" => Json(HttpStatusCode.OK, $$"""
+                {"status":"accepted","id":"{{reportId}}","uploaded_at":"2026-09-21T08:00:00Z"}
                 """),
             _ => Json(HttpStatusCode.NotFound, "{}")
         });
@@ -68,6 +73,11 @@ public sealed class CentralApiClientTests
         ]);
         await client.PullAsync(connection, "a+b/c==", 37);
         await client.AcknowledgeAsync(connection, "cursor:next");
+        var reportBytes = new byte[] { 0x50, 0x4b, 0x03, 0x04, 1, 2, 3 };
+        var reportHash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(reportBytes));
+        var reportResult = await client.UploadShiftReportAsync(
+            connection, shiftId, 1, "2026-09-21", "MORNING", "Main_Branch_2026-09-21_morning.xlsx", reportHash, reportBytes);
+        Assert.Equal(reportId, reportResult.Id);
 
         Assert.Equal(
         [
@@ -76,7 +86,8 @@ public sealed class CentralApiClientTests
             "POST https://erp.example.test/api/v1/enrollment",
             "POST https://erp.example.test/api/v1/sync/push",
             "GET https://erp.example.test/api/v1/sync/pull?cursor=a%2Bb%2Fc%3D%3D&limit=37",
-            "POST https://erp.example.test/api/v1/sync/ack"
+            "POST https://erp.example.test/api/v1/sync/ack",
+            "POST https://erp.example.test/api/v1/reports/upload"
         ], handler.Requests.Select(value => $"{value.Method} {value.Uri}").ToArray());
 
         var enrollmentRequest = handler.Requests[2];
@@ -103,6 +114,13 @@ public sealed class CentralApiClientTests
         }
         using (var body = JsonDocument.Parse(handler.Requests[5].Body!))
             Assert.Equal("cursor:next", body.RootElement.GetProperty("cursor").GetString());
+        using (var body = JsonDocument.Parse(handler.Requests[6].Body!))
+        {
+            Assert.Equal(shiftId, body.RootElement.GetProperty("shiftId").GetGuid());
+            Assert.Equal(reportHash, body.RootElement.GetProperty("contentHash").GetString());
+            Assert.Equal(reportBytes.Length, body.RootElement.GetProperty("byteLength").GetInt32());
+            Assert.Equal(reportBytes, Convert.FromBase64String(body.RootElement.GetProperty("contentBase64").GetString()!));
+        }
     }
 
     [Fact]

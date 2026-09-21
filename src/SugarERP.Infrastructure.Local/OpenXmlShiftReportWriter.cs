@@ -27,7 +27,8 @@ public sealed class OpenXmlShiftReportWriter : IShiftReportWriter
         var directory = Path.GetFullPath(Environment.ExpandEnvironmentVariables(exportDirectory.Trim()));
         Directory.CreateDirectory(directory);
         var kind = report.Kind == ShiftKind.Morning ? "morning" : "evening";
-        var fileName = $"shift-{report.BusinessDate}-{kind}-{report.ShiftId.ToString("N")[..8]}-v{report.ReportVersion}.xlsx";
+        var businessDate = ParseBusinessDate(report.BusinessDate);
+        var fileName = $"{SanitizeFileNamePart(report.SiteName)}_{businessDate:yyyy-MM-dd}_{kind}.xlsx";
         var targetPath = Path.Combine(directory, fileName);
         var fingerprint = BuildFingerprint(report);
         if (File.Exists(targetPath))
@@ -99,91 +100,41 @@ public sealed class OpenXmlShiftReportWriter : IShiftReportWriter
     private static Worksheet BuildReportSheet(ShiftReportData report)
     {
         var sheetData = new SheetData();
-        var hasWaste = report.Items.Any(item => item.WasteScaled != 0);
-        var hasAdjustments = report.Items.Any(item => item.AdjustmentScaled != 0);
-        var varianceItems = report.Items.Where(item => item.DifferenceScaled != 0).ToArray();
-        var totalRefundsMinor = report.CashRefundsMinor + report.VisaRefundsMinor;
-        var netSalesMinor = report.CashSalesMinor + report.VisaSalesMinor - totalRefundsMinor;
+        var businessDate = ParseBusinessDate(report.BusinessDate);
+        var netCashMinor = report.CashSalesMinor - report.CashRefundsMinor;
+        var netVisaMinor = report.VisaSalesMinor - report.VisaRefundsMinor;
 
         sheetData.Append(Row(1));
-        sheetData.Append(Row(2, 30, Text("تقرير الوردية", 1)));
-        sheetData.Append(Row(3, 34,
-            Text("الفرع", 4), Text(report.SiteName, 9),
-            Text("تاريخ العمل", 4), Text(report.BusinessDate, 9),
-            Text("الوردية", 4), Text(report.Kind == ShiftKind.Morning ? "صباحية" : "مسائية", 9)));
-        sheetData.Append(Row(4,
-            Text("وقت الفتح", 4), Date(report.OpenedAtUtc.LocalDateTime, 6),
-            Text("وقت الإغلاق", 4), Date(report.ClosedAtUtc.LocalDateTime, 6),
-            Text("الإيصالات", 4), Number(report.ReceiptCount, 9)));
-        sheetData.Append(Row(5));
-        sheetData.Append(Row(6, 24, Text("المبيعات والصندوق", 2)));
-        sheetData.Append(Row(7, Text("المبيعات", 3), Text("ج.م", 3), Text("الصندوق", 3), Text("ج.م", 3)));
-        sheetData.Append(Row(8, Text("نقدي", 4), Money(report.CashSalesMinor), Text("العهدة الافتتاحية", 4), Money(report.OpeningCashMinor)));
-        sheetData.Append(Row(9, Text("فيزا", 4), Money(report.VisaSalesMinor), Text("النقدية المتوقعة", 4), Money(report.ExpectedCashMinor)));
-        sheetData.Append(Row(10, Text("المرتجعات", 4), Money(totalRefundsMinor), Text("النقدية الفعلية", 4), Money(report.ActualCashMinor)));
-        sheetData.Append(Row(11, Text("صافي المبيعات", 10), Money(netSalesMinor, 11), Text("فرق النقدية", 10), Money(report.DifferenceMinor, report.DifferenceMinor == 0 ? 11U : 7U)));
-        sheetData.Append(Row(13, 24, Text("حركة الأصناف", 2)));
-
-        var itemHeaders = new List<Cell>
-        {
-            Text("الصنف", 3), Text("الوحدة", 3), Text("افتتاحية", 3), Text("وارد", 3),
-            Text("مباع", 3), Text("طلبات عملاء", 3), Text("مرتجع عميل", 3), Text("مرتجع للمطبخ", 3)
-        };
-        if (hasWaste) itemHeaders.Add(Text("هالك", 3));
-        if (hasAdjustments) itemHeaders.Add(Text("تسوية", 3));
-        itemHeaders.Add(Text("المتبقي", 3));
-        const uint itemHeaderRow = 14;
-        sheetData.Append(Row(itemHeaderRow, 25, itemHeaders.ToArray()));
+        sheetData.Append(Row(2, 28, Text($"{report.SiteName} — {(report.Kind == ShiftKind.Morning ? "Morning" : "Evening")} Shift", 1)));
+        const uint itemHeaderRow = 4;
+        sheetData.Append(Row(itemHeaderRow, 25,
+            Text("Item", 2),
+            Text("Opening", 2),
+            Text("Wared", 2),
+            Text("Sold", 2),
+            Text("Mortaga3", 2),
+            Text("Leftover", 2)));
 
         uint rowIndex = itemHeaderRow + 1;
         foreach (var item in report.Items)
         {
-            var cells = new List<Cell>
-            {
-                Text(item.Name, 14), Text(item.Unit, 14),
-                Quantity(item.OpeningScaled, item.QuantityScale, 15),
-                Quantity(item.IncomingScaled, item.QuantityScale, 15),
-                Quantity(item.SoldScaled, item.QuantityScale, 15),
-                Quantity(item.CafeIssuedScaled, item.QuantityScale, 15),
-                Quantity(item.CustomerRestockScaled, item.QuantityScale, 15),
-                Quantity(item.KitchenReturnScaled, item.QuantityScale, 15)
-            };
-            if (hasWaste) cells.Add(Quantity(item.WasteScaled, item.QuantityScale, 15));
-            if (hasAdjustments) cells.Add(Quantity(item.AdjustmentScaled, item.QuantityScale, 15));
-            cells.Add(Quantity(item.ExpectedScaled, item.QuantityScale, 16));
-            sheetData.Append(Row(rowIndex++, cells.ToArray()));
+            sheetData.Append(Row(rowIndex++,
+                Text(item.Name, 3),
+                Quantity(item.OpeningScaled, item.QuantityScale),
+                Quantity(item.IncomingScaled, item.QuantityScale),
+                Quantity(checked(item.SoldScaled + item.CafeIssuedScaled), item.QuantityScale),
+                Quantity(item.KitchenReturnScaled, item.QuantityScale),
+                Quantity(item.ActualScaled, item.QuantityScale)));
         }
 
         var itemLastRow = Math.Max(itemHeaderRow, rowIndex - 1);
-        if (varianceItems.Length > 0)
-        {
-            rowIndex++;
-            sheetData.Append(Row(rowIndex++, 24, Text("فروق تحتاج مراجعة", 2)));
-            sheetData.Append(Row(rowIndex++, Text("الصنف", 3), Text("المتبقي المحسوب", 3), Text("العد المسجل", 3), Text("الفرق", 3)));
-            foreach (var item in varianceItems)
-            {
-                sheetData.Append(Row(rowIndex++,
-                    Text(item.Name, 14),
-                    Quantity(item.ExpectedScaled, item.QuantityScale, 15),
-                    Quantity(item.ActualScaled, item.QuantityScale, 15),
-                    Quantity(item.DifferenceScaled, item.QuantityScale, 13)));
-            }
-        }
-
-        if (report.PendingHoldCount > 0 || report.PendingReturnCount > 0)
-        {
-            rowIndex++;
-            sheetData.Append(Row(rowIndex++, 24, Text("متابعة مطلوبة", 2)));
-            if (report.PendingHoldCount > 0)
-                sheetData.Append(Row(rowIndex++, Text("طلبات وارد تحت المراجعة", 4), Number(report.PendingHoldCount, 12)));
-            if (report.PendingReturnCount > 0)
-                sheetData.Append(Row(rowIndex++, Text("مرتجعات مطبخ بانتظار الإقرار", 4), Number(report.PendingReturnCount, 12)));
-        }
-
         rowIndex++;
-        sheetData.Append(Row(rowIndex, Text("نسخة الإغلاق الأصلية — أي تصحيح لاحق يظهر كسجل جديد ولا يغيّر هذا التقرير.", 8)));
+        sheetData.Append(Row(rowIndex, 24,
+            Text("Date", 8), Date(businessDate.ToDateTime(TimeOnly.MinValue), 9),
+            Text("Total Cash", 8), Money(netCashMinor, 10),
+            Text("Total Visa", 8), Money(netVisaMinor, 10)));
 
-        var views = RightToLeftViews();
+        var views = ReportViews();
         views.GetFirstChild<SheetView>()!.Pane = new Pane
         {
             VerticalSplit = itemHeaderRow,
@@ -192,20 +143,17 @@ public sealed class OpenXmlShiftReportWriter : IShiftReportWriter
             State = PaneStateValues.Frozen
         };
 
-        var columnCount = itemHeaders.Count;
-        var lastColumn = ColumnName(columnCount);
         return new Worksheet(
             views,
             new SheetFormatProperties { DefaultRowHeight = 20 },
             new Columns(
-                new Column { Min = 1, Max = 1, Width = 30, CustomWidth = true },
-                new Column { Min = 2, Max = 2, Width = 14, CustomWidth = true },
-                new Column { Min = 3, Max = (uint)columnCount, Width = 15, CustomWidth = true }),
+                new Column { Min = 1, Max = 1, Width = 32, CustomWidth = true },
+                new Column { Min = 2, Max = 6, Width = 15, CustomWidth = true }),
             sheetData,
-            new AutoFilter { Reference = $"A{itemHeaderRow}:{lastColumn}{itemLastRow}" },
+            new AutoFilter { Reference = $"A{itemHeaderRow}:F{itemLastRow}" },
             new PrintOptions { HorizontalCentered = true },
             new PageMargins { Left = 0.25, Right = 0.25, Top = 0.4, Bottom = 0.4, Header = 0.2, Footer = 0.2 },
-            new PageSetup { Orientation = OrientationValues.Landscape, FitToWidth = 1, FitToHeight = 0 });
+            new PageSetup { Orientation = OrientationValues.Landscape, FitToWidth = 1, FitToHeight = 0, PaperSize = 9 });
     }
 
     private static Worksheet BuildMetadataSheet(ShiftReportData report, string fingerprint)
@@ -217,63 +165,64 @@ public sealed class OpenXmlShiftReportWriter : IShiftReportWriter
         return new Worksheet(data);
     }
 
-    private static SheetViews RightToLeftViews() => new(
-        new SheetView { WorkbookViewId = 0, RightToLeft = true, ShowGridLines = false });
+    private static SheetViews ReportViews() => new(
+        new SheetView { WorkbookViewId = 0, RightToLeft = false, ShowGridLines = false });
 
     private static Stylesheet BuildStyles()
     {
         var numberingFormats = new NumberingFormats(
-            new NumberingFormat { NumberFormatId = 164, FormatCode = "#,##0.00;[Red]-#,##0.00" },
-            new NumberingFormat { NumberFormatId = 165, FormatCode = "dd/mm/yyyy hh:mm" }) { Count = 2 };
+            new NumberingFormat { NumberFormatId = 164, FormatCode = "#,##0" },
+            new NumberingFormat { NumberFormatId = 165, FormatCode = "#,##0.0" },
+            new NumberingFormat { NumberFormatId = 166, FormatCode = "#,##0.00" },
+            new NumberingFormat { NumberFormatId = 167, FormatCode = "#,##0.000" },
+            new NumberingFormat { NumberFormatId = 168, FormatCode = "yyyy-mm-dd" },
+            new NumberingFormat { NumberFormatId = 169, FormatCode = "#,##0.00;[Red]-#,##0.00" }) { Count = 6 };
         var fonts = new Fonts(
             new Font(new FontSize { Val = 10 }, new Color { Rgb = "FF30242A" }, new FontName { Val = "Arial" }),
-            new Font(new Bold(), new FontSize { Val = 18 }, new Color { Rgb = "FF6D2944" }, new FontName { Val = "Arial" }),
+            new Font(new Bold(), new FontSize { Val = 14 }, new Color { Rgb = "FF6D2944" }, new FontName { Val = "Arial" }),
             new Font(new Bold(), new FontSize { Val = 10 }, new Color { Rgb = "FFFFFFFF" }, new FontName { Val = "Arial" }),
-            new Font(new Bold(), new FontSize { Val = 10 }, new Color { Rgb = "FF6D2944" }, new FontName { Val = "Arial" }),
-            new Font(new Italic(), new FontSize { Val = 9 }, new Color { Rgb = "FF806070" }, new FontName { Val = "Arial" }),
-            new Font(new Bold(), new FontSize { Val = 10 }, new Color { Rgb = "FFC9364E" }, new FontName { Val = "Arial" })) { Count = 6 };
+            new Font(new Bold(), new FontSize { Val = 10 }, new Color { Rgb = "FF6D2944" }, new FontName { Val = "Arial" })) { Count = 4 };
         var fills = new Fills(
             new Fill(new PatternFill { PatternType = PatternValues.None }),
             new Fill(new PatternFill { PatternType = PatternValues.Gray125 }),
             SolidFill("FFD94F83"),
-            SolidFill("FFFFF5F8"),
-            SolidFill("FFF8C8D8"),
-            SolidFill("FFFFE4E8")) { Count = 6 };
+            SolidFill("FFFFF5F8")) { Count = 4 };
         var borders = new Borders(
             new Border(),
             new Border(
-                new LeftBorder { Style = BorderStyleValues.Thin, Color = new Color { Rgb = "FFE8CBD6" } },
-                new RightBorder { Style = BorderStyleValues.Thin, Color = new Color { Rgb = "FFE8CBD6" } },
-                new TopBorder { Style = BorderStyleValues.Thin, Color = new Color { Rgb = "FFE8CBD6" } },
                 new BottomBorder { Style = BorderStyleValues.Thin, Color = new Color { Rgb = "FFE8CBD6" } },
                 new DiagonalBorder())) { Count = 2 };
-        var plainBorder = new Border(
-            new LeftBorder { Style = BorderStyleValues.Thin, Color = new Color { Rgb = "FFE8CBD6" } },
-            new RightBorder { Style = BorderStyleValues.Thin, Color = new Color { Rgb = "FFE8CBD6" } },
-            new TopBorder { Style = BorderStyleValues.Thin, Color = new Color { Rgb = "FFE8CBD6" } },
-            new BottomBorder { Style = BorderStyleValues.Thin, Color = new Color { Rgb = "FFE8CBD6" } },
-            new DiagonalBorder());
-        borders.Append(plainBorder);
-        borders.Count = 3;
         var cellFormats = new CellFormats(
             new CellFormat { FontId = 0, FillId = 0, BorderId = 0 },
             new CellFormat { FontId = 1, FillId = 0, BorderId = 0, Alignment = new Alignment { Horizontal = HorizontalAlignmentValues.Right, Vertical = VerticalAlignmentValues.Center } },
             new CellFormat { FontId = 2, FillId = 2, BorderId = 1, Alignment = new Alignment { Horizontal = HorizontalAlignmentValues.Center, Vertical = VerticalAlignmentValues.Center, WrapText = true } },
-            new CellFormat { FontId = 2, FillId = 2, BorderId = 1, Alignment = new Alignment { Horizontal = HorizontalAlignmentValues.Center, Vertical = VerticalAlignmentValues.Center, WrapText = true } },
-            new CellFormat { FontId = 3, FillId = 0, BorderId = 0, Alignment = new Alignment { Horizontal = HorizontalAlignmentValues.Right, Vertical = VerticalAlignmentValues.Center } },
-            new CellFormat { FontId = 0, FillId = 0, BorderId = 0, NumberFormatId = 164, ApplyNumberFormat = true, Alignment = new Alignment { Horizontal = HorizontalAlignmentValues.Right, Vertical = VerticalAlignmentValues.Center } },
-            new CellFormat { FontId = 0, FillId = 0, BorderId = 0, NumberFormatId = 165, ApplyNumberFormat = true, Alignment = new Alignment { Horizontal = HorizontalAlignmentValues.Right, Vertical = VerticalAlignmentValues.Center } },
-            new CellFormat { FontId = 5, FillId = 5, BorderId = 0, NumberFormatId = 164, ApplyNumberFormat = true, Alignment = new Alignment { Horizontal = HorizontalAlignmentValues.Right, Vertical = VerticalAlignmentValues.Center } },
-            new CellFormat { FontId = 4, FillId = 0, BorderId = 0, Alignment = new Alignment { Horizontal = HorizontalAlignmentValues.Right, Vertical = VerticalAlignmentValues.Center, WrapText = false } },
-            new CellFormat { FontId = 0, FillId = 3, BorderId = 0, Alignment = new Alignment { Horizontal = HorizontalAlignmentValues.Right, Vertical = VerticalAlignmentValues.Center, WrapText = true } },
-            new CellFormat { FontId = 3, FillId = 4, BorderId = 0, Alignment = new Alignment { Horizontal = HorizontalAlignmentValues.Right, Vertical = VerticalAlignmentValues.Center } },
-            new CellFormat { FontId = 3, FillId = 4, BorderId = 0, NumberFormatId = 164, ApplyNumberFormat = true, Alignment = new Alignment { Horizontal = HorizontalAlignmentValues.Right, Vertical = VerticalAlignmentValues.Center } },
-            new CellFormat { FontId = 5, FillId = 5, BorderId = 0, Alignment = new Alignment { Horizontal = HorizontalAlignmentValues.Right, Vertical = VerticalAlignmentValues.Center } },
-            new CellFormat { FontId = 5, FillId = 5, BorderId = 0, Alignment = new Alignment { Horizontal = HorizontalAlignmentValues.Right, Vertical = VerticalAlignmentValues.Center } },
-            new CellFormat { FontId = 0, FillId = 0, BorderId = 2, Alignment = new Alignment { Horizontal = HorizontalAlignmentValues.Right, Vertical = VerticalAlignmentValues.Center } },
-            new CellFormat { FontId = 0, FillId = 0, BorderId = 2, Alignment = new Alignment { Horizontal = HorizontalAlignmentValues.Center, Vertical = VerticalAlignmentValues.Center } },
-            new CellFormat { FontId = 3, FillId = 3, BorderId = 2, Alignment = new Alignment { Horizontal = HorizontalAlignmentValues.Center, Vertical = VerticalAlignmentValues.Center } }) { Count = 17 };
+            new CellFormat { FontId = 0, FillId = 0, BorderId = 1, Alignment = new Alignment { Horizontal = HorizontalAlignmentValues.Right, Vertical = VerticalAlignmentValues.Center } },
+            new CellFormat { FontId = 0, FillId = 0, BorderId = 1, NumberFormatId = 164, ApplyNumberFormat = true, Alignment = new Alignment { Horizontal = HorizontalAlignmentValues.Right, Vertical = VerticalAlignmentValues.Center, ReadingOrder = 1U } },
+            new CellFormat { FontId = 0, FillId = 0, BorderId = 1, NumberFormatId = 165, ApplyNumberFormat = true, Alignment = new Alignment { Horizontal = HorizontalAlignmentValues.Right, Vertical = VerticalAlignmentValues.Center, ReadingOrder = 1U } },
+            new CellFormat { FontId = 0, FillId = 0, BorderId = 1, NumberFormatId = 166, ApplyNumberFormat = true, Alignment = new Alignment { Horizontal = HorizontalAlignmentValues.Right, Vertical = VerticalAlignmentValues.Center, ReadingOrder = 1U } },
+            new CellFormat { FontId = 0, FillId = 0, BorderId = 1, NumberFormatId = 167, ApplyNumberFormat = true, Alignment = new Alignment { Horizontal = HorizontalAlignmentValues.Right, Vertical = VerticalAlignmentValues.Center, ReadingOrder = 1U } },
+            new CellFormat { FontId = 3, FillId = 3, BorderId = 0, Alignment = new Alignment { Horizontal = HorizontalAlignmentValues.Right, Vertical = VerticalAlignmentValues.Center } },
+            new CellFormat { FontId = 0, FillId = 3, BorderId = 0, NumberFormatId = 168, ApplyNumberFormat = true, Alignment = new Alignment { Horizontal = HorizontalAlignmentValues.Right, Vertical = VerticalAlignmentValues.Center, ReadingOrder = 1U } },
+            new CellFormat { FontId = 3, FillId = 3, BorderId = 0, NumberFormatId = 169, ApplyNumberFormat = true, Alignment = new Alignment { Horizontal = HorizontalAlignmentValues.Right, Vertical = VerticalAlignmentValues.Center, ReadingOrder = 1U } }) { Count = 11 };
         return new Stylesheet(numberingFormats, fonts, fills, borders, cellFormats);
+    }
+
+    private static DateOnly ParseBusinessDate(string value)
+    {
+        if (!DateOnly.TryParseExact(value, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var date))
+            throw new BusinessRuleException("INVALID_REPORT_DATE", "تاريخ تقرير الوردية غير صالح.");
+        return date;
+    }
+
+    private static string SanitizeFileNamePart(string value)
+    {
+        var invalid = Path.GetInvalidFileNameChars().ToHashSet();
+        var sanitized = new string(value.Trim().Select(character =>
+            invalid.Contains(character) || char.IsControl(character) || char.IsWhiteSpace(character) ? '_' : character).ToArray());
+        while (sanitized.Contains("__", StringComparison.Ordinal)) sanitized = sanitized.Replace("__", "_", StringComparison.Ordinal);
+        sanitized = sanitized.Trim('_', '.');
+        if (sanitized.Length > 80) sanitized = sanitized[..80].TrimEnd('_', '.');
+        return string.IsNullOrWhiteSpace(sanitized) ? "branch" : sanitized;
     }
 
     private static Fill SolidFill(string rgb) => new(new PatternFill(
@@ -317,14 +266,14 @@ public sealed class OpenXmlShiftReportWriter : IShiftReportWriter
         StyleIndex = style
     };
 
-    private static Cell Quantity(long scaled, int scale, uint style = 3) => new()
+    private static Cell Quantity(long scaled, int scale) => new()
     {
         DataType = CellValues.Number,
         CellValue = new CellValue(((decimal)scaled / Math.Max(1, scale)).ToString(CultureInfo.InvariantCulture)),
-        StyleIndex = style
+        StyleIndex = scale <= 1 ? 4U : scale <= 10 ? 5U : scale <= 100 ? 6U : 7U
     };
 
-    private static Cell Money(long minor, uint style = 5) => new()
+    private static Cell Money(long minor, uint style = 10) => new()
     {
         DataType = CellValues.Number,
         CellValue = new CellValue(((decimal)minor / 100m).ToString(CultureInfo.InvariantCulture)),

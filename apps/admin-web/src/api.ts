@@ -23,6 +23,19 @@ export interface Device {
   createdAt: string;
 }
 
+export interface ShiftReport {
+  id: string;
+  shift_id: string;
+  site: { id: string; name: string };
+  report_version: number;
+  business_date: string;
+  shift_kind: 'MORNING' | 'EVENING';
+  filename: string;
+  sha256: string;
+  size: string;
+  uploaded_at: string;
+}
+
 export interface Item {
   id: string;
   sku: string;
@@ -272,6 +285,21 @@ async function downloadInstaller(path: string, token: string, onProgress?: (perc
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
+async function downloadReport(path: string, token: string, filename: string) {
+  const response = await fetch(`/api/v1${path}`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!response.ok) throw new ApiError(response.status, await response.json().catch(() => ({})));
+  const content = await response.blob();
+  if (!content.size) throw new Error('Empty report download');
+  const url = URL.createObjectURL(content);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
 export const api = {
   login: (username: string, password: string) =>
     request<{ access_token: string; token_type: 'Bearer'; status: string }>('/auth/login', {
@@ -295,6 +323,9 @@ export const api = {
     request<{ status: string; database: string; migrations: string }>('/ready'),
   sites: (token: string) => request<Site[]>('/sites', {}, token),
   devices: (token: string) => request<Device[]>('/devices', {}, token),
+  reports: (token: string) => request<ShiftReport[]>('/admin/reports', {}, token),
+  downloadReport: (token: string, report: Pick<ShiftReport, 'id' | 'filename'>) =>
+    downloadReport(`/admin/reports/${report.id}/download`, token, report.filename),
   items: (token: string) => request<Item[]>('/items', {}, token),
   users: (token: string) => request<User[]>('/users', {}, token),
   roles: (token: string) => request<Role[]>('/roles', {}, token),

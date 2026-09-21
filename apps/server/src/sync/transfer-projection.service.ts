@@ -503,7 +503,7 @@ export class TransferProjectionService {
   }
 
   private async archiveCafeCustomer(tx: Client, event: SyncEventDto, siteId: string, profile: DeviceProfile) {
-    if (profile !== DeviceProfile.BRANCH_TYPE_2) error('WRONG_PROFILE', 'Only Branch Type 2 can archive its cafe customers', 403);
+    if (profile === DeviceProfile.KITCHEN) error('WRONG_PROFILE', 'A kitchen cannot archive branch cafe customers', 403);
     const payload = object(event.payload), customerId = id(payload.customer_id);
     if (id(payload.site_id) !== siteId) error('WRONG_SITE', 'Cafe customer origin does not match the authenticated site', 403);
     const customer = await tx.cafeCustomer.findUnique({ where: { id: customerId } });

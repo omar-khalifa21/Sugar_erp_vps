@@ -62,6 +62,11 @@ public sealed record SyncAckResponse(
     [property: JsonPropertyName("acknowledged")] bool Acknowledged,
     [property: JsonPropertyName("server_position")] string ServerPosition);
 
+public sealed record ReportUploadResponse(
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("id")] Guid Id,
+    [property: JsonPropertyName("uploaded_at")] DateTimeOffset UploadedAt);
+
 public sealed class CentralApiException : Exception
 {
     public CentralApiException(
@@ -200,6 +205,35 @@ public sealed class CentralApiClient(HttpClient httpClient)
         request.Content = JsonContent.Create(new { cursor }, options: JsonOptions);
         using var response = await httpClient.SendAsync(request, cancellationToken);
         return await ReadSuccessAsync<SyncAckResponse>(response, cancellationToken);
+    }
+
+    public async Task<ReportUploadResponse> UploadShiftReportAsync(
+        DeviceConnection connection,
+        Guid shiftId,
+        int reportVersion,
+        string businessDate,
+        string shiftKind,
+        string filename,
+        string contentHash,
+        byte[] content,
+        CancellationToken cancellationToken = default)
+    {
+        using var request = CreateDeviceRequest(connection, HttpMethod.Post, "reports/upload");
+        request.Content = JsonContent.Create(new
+        {
+            shiftId,
+            reportVersion,
+            businessDate,
+            shiftKind,
+            filename,
+            contentHash,
+            byteLength = content.LongLength,
+            contentBase64 = Convert.ToBase64String(content)
+        }, options: JsonOptions);
+        using var response = await httpClient.SendAsync(request, cancellationToken);
+        var result = await ReadSuccessAsync<ReportUploadResponse>(response, cancellationToken);
+        if (result.Id == Guid.Empty || result.Status is not ("accepted" or "duplicate")) throw InvalidResponse(response);
+        return result;
     }
 
     private async Task<CentralEndpointStatus> ProbeAsync(Uri apiBaseUrl, string relativePath, CancellationToken cancellationToken)

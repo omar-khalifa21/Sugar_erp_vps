@@ -1,3 +1,4 @@
+using System.Globalization;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Spreadsheet;
 using DocumentFormat.OpenXml.Validation;
@@ -453,6 +454,7 @@ public sealed class BranchModuleOperationsServiceTests
         var secondWrite = await writer.WriteAsync(closed.Report, store.ExportDirectory);
         Assert.True(File.Exists(written.Path));
         Assert.Equal(".xlsx", Path.GetExtension(written.Path));
+        Assert.Equal($"Test_Branch_{closed.Report.BusinessDate}_morning.xlsx", Path.GetFileName(written.Path));
         Assert.True(written.ByteLength > 0);
         Assert.Matches("^[0-9a-f]{64}$", written.Sha256);
         Assert.True(secondWrite.ExistingIdenticalFile);
@@ -483,12 +485,38 @@ public sealed class BranchModuleOperationsServiceTests
                 reportWorksheet.Descendants<Cell>()
                     .Select(value => value.InlineString?.InnerText)
                     .Where(value => !string.IsNullOrWhiteSpace(value)));
-            Assert.Contains("صافي المبيعات", visibleText);
-            Assert.Contains("حركة الأصناف", visibleText);
-            Assert.Contains("فروق تحتاج مراجعة", visibleText);
-            Assert.DoesNotContain("مرتجعات نقدي", visibleText);
-            Assert.DoesNotContain("مرتجعات فيزا", visibleText);
-            Assert.DoesNotContain("عد فعلي", visibleText);
+            Assert.Contains("Item | Opening | Wared | Sold | Mortaga3 | Leftover", visibleText);
+            Assert.Contains("Date", visibleText);
+            Assert.Contains("Total Cash", visibleText);
+            Assert.Contains("Total Visa", visibleText);
+            Assert.DoesNotContain("المبيعات والصندوق", visibleText);
+            Assert.DoesNotContain("فروق تحتاج مراجعة", visibleText);
+            Assert.DoesNotContain("shift_id", visibleText);
+
+            var rows = reportWorksheet.Descendants<Row>().ToDictionary(value => value.RowIndex!.Value);
+            var header = rows[4].Elements<Cell>().ToArray();
+            Assert.Equal(new[] { "Item", "Opening", "Wared", "Sold", "Mortaga3", "Leftover" },
+                header.Select(value => value.InlineString?.InnerText).ToArray());
+            var orderedItems = closed.Report.Items.OrderBy(value => value.Name).ToArray();
+            Assert.Equal(orderedItems.Length, rows.Keys.Count(value => value >= 5 && value < 5 + orderedItems.Length));
+            for (var index = 0; index < orderedItems.Length; index++)
+            {
+                var item = orderedItems[index];
+                var cells = rows[(uint)(5 + index)].Elements<Cell>().ToArray();
+                Assert.Equal(item.Name, cells[0].InlineString?.InnerText);
+                Assert.Equal((decimal)item.OpeningScaled / item.QuantityScale, decimal.Parse(cells[1].CellValue!.Text, CultureInfo.InvariantCulture));
+                Assert.Equal((decimal)item.IncomingScaled / item.QuantityScale, decimal.Parse(cells[2].CellValue!.Text, CultureInfo.InvariantCulture));
+                Assert.Equal((decimal)(item.SoldScaled + item.CafeIssuedScaled) / item.QuantityScale, decimal.Parse(cells[3].CellValue!.Text, CultureInfo.InvariantCulture));
+                Assert.Equal((decimal)item.KitchenReturnScaled / item.QuantityScale, decimal.Parse(cells[4].CellValue!.Text, CultureInfo.InvariantCulture));
+                Assert.Equal((decimal)item.ActualScaled / item.QuantityScale, decimal.Parse(cells[5].CellValue!.Text, CultureInfo.InvariantCulture));
+            }
+            var footer = rows[(uint)(6 + orderedItems.Length)].Elements<Cell>().ToArray();
+            Assert.Equal("Date", footer[0].InlineString?.InnerText);
+            Assert.Equal(CellValues.Number, footer[1].DataType!.Value);
+            Assert.Equal("Total Cash", footer[2].InlineString?.InnerText);
+            Assert.Equal((decimal)(closed.Report.CashSalesMinor - closed.Report.CashRefundsMinor) / 100m, decimal.Parse(footer[3].CellValue!.Text, CultureInfo.InvariantCulture));
+            Assert.Equal("Total Visa", footer[4].InlineString?.InnerText);
+            Assert.Equal((decimal)(closed.Report.VisaSalesMinor - closed.Report.VisaRefundsMinor) / 100m, decimal.Parse(footer[5].CellValue!.Text, CultureInfo.InvariantCulture));
             var validationErrors = new OpenXmlValidator().Validate(document).ToArray();
             Assert.True(
                 validationErrors.Length == 0,
@@ -504,8 +532,21 @@ public sealed class BranchModuleOperationsServiceTests
             () => writer.WriteAsync(changedReport, store.ExportDirectory));
         Assert.Equal("IMMUTABLE_REPORT_CONFLICT", conflict.Code);
 
+        await using (var db = store.Database.CreateContext())
+        {
+            var uploadJob = await db.SideEffectJobs.SingleAsync(value => value.SourceId == shift.Id && value.Kind == SideEffectKind.UploadShiftReport);
+            uploadJob.State = SideEffectState.Failed;
+            uploadJob.LastError = "REPORT_UPLOAD_OFFLINE";
+            await db.SaveChangesAsync();
+        }
         await store.Modules.MarkReportSucceededAsync(closed.ExportJobId, written);
         await store.Modules.MarkReportSucceededAsync(closed.ExportJobId, written);
+        await using (var db = store.Database.CreateContext())
+        {
+            var uploadJob = await db.SideEffectJobs.SingleAsync(value => value.SourceId == shift.Id && value.Kind == SideEffectKind.UploadShiftReport);
+            Assert.Equal(SideEffectState.Pending, uploadJob.State);
+            Assert.Null(uploadJob.LastError);
+        }
         var history = await store.Modules.GetClosedShiftsAsync();
         var historyShift = Assert.Single(history);
         Assert.Equal("جاهز", historyShift.ReportStatus);
