@@ -1,4 +1,4 @@
-import { Controller, Get, NotFoundException, Res, StreamableFile } from '@nestjs/common';
+import { Controller, Get, Header, NotFoundException, Res, StreamableFile } from '@nestjs/common';
 import { createReadStream } from 'node:fs';
 import { lstat, readFile } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
@@ -41,23 +41,27 @@ export class ReleasesController {
   }
 
   @Get('current')
+  @Header('Cache-Control', 'no-store')
   async metadata() {
     const { manifest, size } = await this.current();
     return { profile: 'BRANCH_TYPE_1', ...manifest, channel: 'production', required: manifest.required ?? false, signed: manifest.signed === true, size, downloadUrl: 'current/download' };
   }
 
   @Get('touch/current')
+  @Header('Cache-Control', 'no-store')
   async touchMetadata() {
     const { manifest, size } = await this.current('touch');
     return { profile: 'BRANCH_TYPE_1', variant: 'TOUCH', ...manifest, channel: 'production', required: manifest.required ?? false, signed: manifest.signed === true, size, downloadUrl: 'current/download' };
   }
 
   @Get('current/download')
+  @Header('Cache-Control', 'no-store')
   async download(@Res({ passthrough: true }) response: Response): Promise<StreamableFile> {
     return this.stream(response, 'desktop');
   }
 
   @Get('touch/current/download')
+  @Header('Cache-Control', 'no-store')
   async touchDownload(@Res({ passthrough: true }) response: Response): Promise<StreamableFile> {
     return this.stream(response, 'touch');
   }

@@ -260,7 +260,7 @@ async function request<T>(
 }
 
 async function downloadInstaller(path: string, token: string, onProgress?: (percent: number) => void, signal?: AbortSignal) {
-  const response = await fetch(`/api/v1${path}`, { headers: { Authorization: `Bearer ${token}` }, signal });
+  const response = await fetch(`/api/v1${path}`, { cache: 'no-store', headers: { Authorization: `Bearer ${token}` }, signal });
   if (!response.ok) throw new ApiError(response.status, await response.json().catch(() => ({})));
   const total = Number(response.headers.get('Content-Length'));
   const reader = response.body?.getReader();
@@ -308,10 +308,10 @@ export const api = {
     }),
   signup: (input: { username: string; displayName: string; password: string }) =>
     request<{ status: 'PENDING_PERMISSION' }>('/auth/signup', { method: 'POST', body: JSON.stringify(input) }),
-  branchOneRelease: (token: string) => request<{ channel: 'production'; version: string; filename: string; publishedAt: string; sha256: string; size: number; releaseNotes?: string }>('/releases/branch-type-1/current', {}, token),
-  branchOneTouchRelease: (token: string) => request<{ channel: 'production'; version: string; filename: string; publishedAt: string; sha256: string; size: number; releaseNotes?: string }>('/releases/branch-type-1/touch/current', {}, token),
-  kitchenRelease: (token: string) => request<{ channel: 'production'; version: string; filename: string; publishedAt: string; sha256: string; size: number; releaseNotes?: string }>('/releases/kitchen/current', {}, token),
-  branchTwoRelease: (token: string) => request<{ channel: 'production'; version: string; filename: string; publishedAt: string; sha256: string; size: number; releaseNotes?: string }>('/releases/branch-type-2/current', {}, token),
+  branchOneRelease: (token: string) => request<{ channel: 'production'; version: string; filename: string; publishedAt: string; sha256: string; size: number; releaseNotes?: string }>('/releases/branch-type-1/current', { cache: 'no-store' }, token),
+  branchOneTouchRelease: (token: string) => request<{ channel: 'production'; version: string; filename: string; publishedAt: string; sha256: string; size: number; releaseNotes?: string }>('/releases/branch-type-1/touch/current', { cache: 'no-store' }, token),
+  kitchenRelease: (token: string) => request<{ channel: 'production'; version: string; filename: string; publishedAt: string; sha256: string; size: number; releaseNotes?: string }>('/releases/kitchen/current', { cache: 'no-store' }, token),
+  branchTwoRelease: (token: string) => request<{ channel: 'production'; version: string; filename: string; publishedAt: string; sha256: string; size: number; releaseNotes?: string }>('/releases/branch-type-2/current', { cache: 'no-store' }, token),
   downloadBranchOne: (token: string, variant: 'desktop' | 'touch' = 'desktop', onProgress?: (percent: number) => void, signal?: AbortSignal) =>
     downloadInstaller(`/releases/branch-type-1${variant === 'touch' ? '/touch' : ''}/current/download`, token, onProgress, signal),
   downloadKitchen: (token: string, onProgress?: (percent: number) => void, signal?: AbortSignal) =>

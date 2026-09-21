@@ -1,4 +1,4 @@
-import { Controller, Get, NotFoundException, Res, StreamableFile } from '@nestjs/common';
+import { Controller, Get, Header, NotFoundException, Res, StreamableFile } from '@nestjs/common';
 import { createReadStream } from 'node:fs';
 import { lstat, readFile } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
@@ -19,8 +19,8 @@ export class KitchenReleasesController {
       return { manifest, file, size: stat.size };
     } catch { throw new NotFoundException('Kitchen installer is not available'); }
   }
-  @Get('current') async metadata() { const { manifest, size } = await this.current(); return { profile: 'KITCHEN', ...manifest, channel: 'production', required: manifest.required === true, signed: manifest.signed === true, size, downloadUrl: 'current/download' }; }
-  @Get('current/download') async download(@Res({ passthrough: true }) response: Response) {
+  @Get('current') @Header('Cache-Control', 'no-store') async metadata() { const { manifest, size } = await this.current(); return { profile: 'KITCHEN', ...manifest, channel: 'production', required: manifest.required === true, signed: manifest.signed === true, size, downloadUrl: 'current/download' }; }
+  @Get('current/download') @Header('Cache-Control', 'no-store') async download(@Res({ passthrough: true }) response: Response) {
     const { manifest, file, size } = await this.current();
     response.setHeader('Content-Type', 'application/octet-stream'); response.setHeader('Content-Disposition', `attachment; filename="${manifest.filename}"`);
     response.setHeader('Content-Length', String(size)); response.setHeader('X-Content-Type-Options', 'nosniff');
