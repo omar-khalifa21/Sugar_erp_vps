@@ -623,11 +623,15 @@ describe('Contract v1 sync (PostgreSQL integration)', () => {
     const kitchenBootstrap = await request(app.getHttpServer()).get('/api/v1/sync/bootstrap').set(headers).expect(200);
     const branchBootstrap = await request(app.getHttpServer()).get('/api/v1/sync/bootstrap')
       .set({ 'x-device-id': deviceId, 'x-device-secret': deviceSecret }).expect(200);
-    const kitchenBody = kitchenBootstrap.body as { catalog: { id: string }[]; recipes: { product_item_id: string }[]; customers: { id: string }[] };
+    const kitchenBody = kitchenBootstrap.body as { catalog: { id: string }[]; recipes: { product_item_id: string }[];
+      customers: { id: string }[]; stock: { itemId: string; quantityScaled: string; inventoryCostMinor: string }[] };
     const branchBody = branchBootstrap.body as { catalog: { id: string }[] };
     expect(kitchenBody.catalog.some((row) => row.id === kitchenTestProductId)).toBe(true);
     expect(kitchenBody.recipes.some((row) => row.product_item_id === kitchenTestProductId)).toBe(true);
     expect(kitchenBody.customers.some((row) => row.id === cafeId)).toBe(true);
+    expect(kitchenBody.stock.find((row) => row.itemId === kitchenTestIngredientId)).toMatchObject({
+      quantityScaled: '500', inventoryCostMinor: '25000',
+    });
     expect(branchBody.catalog.some((row) => row.id === kitchenTestProductId)).toBe(true);
   });
 });

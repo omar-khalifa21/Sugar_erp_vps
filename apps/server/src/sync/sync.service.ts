@@ -31,7 +31,7 @@ export class SyncService {
       }),
       this.prisma.cafeCustomer.findMany({ where: { active: true }, include: { prices: true }, orderBy: { name: 'asc' } }),
       device.profile === 'KITCHEN' ? this.prisma.recipe.findMany({ where: { active: true }, include: { components: true }, orderBy: { productItemId: 'asc' } }) : Promise.resolve([]),
-      this.prisma.stockBalance.findMany({ where: { siteId: device.siteId }, select: { itemId: true, location: true, quantityScaled: true, version: true, asOfAt: true } }),
+      this.prisma.stockBalance.findMany({ where: { siteId: device.siteId }, select: { itemId: true, location: true, quantityScaled: true, inventoryCostMinor: true, version: true, asOfAt: true } }),
     ]);
     return { contract_version: '1.0', site, catalog: catalog.map(({ siteRetailPrices, ...item }) => ({
       ...item,
@@ -40,7 +40,8 @@ export class SyncService {
     })), customers, recipes: recipes.map((recipe) => ({ id: recipe.id, product_item_id: recipe.productItemId,
       output_scaled: recipe.outputScaled.toString(), version: recipe.version, components: recipe.components.map((component) => ({
         ingredient_item_id: component.ingredientItemId, quantity_scaled: component.quantityScaled.toString(),
-      })) })), stock: stock.map((row) => ({ ...row, quantityScaled: row.quantityScaled.toString() })), as_of: new Date().toISOString() };
+      })) })), stock: stock.map((row) => ({ ...row, quantityScaled: row.quantityScaled.toString(),
+        inventoryCostMinor: row.inventoryCostMinor.toString() })), as_of: new Date().toISOString() };
   }
 
   async push(deviceId: string | undefined, credential: string | undefined, input: SyncPushDto, appVersion?: string) {
