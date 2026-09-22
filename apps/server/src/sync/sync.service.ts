@@ -90,6 +90,15 @@ export class SyncService {
               throw contractError(422, 'INVALID_DESTINATION', 'Shipment destination must be an active branch', false);
             }
           }
+          if (event.event_type === 'kitchen_request.received') {
+            if (device.profile !== DeviceProfile.KITCHEN) {
+              throw contractError(403, 'WRONG_PROFILE', 'Only a kitchen can acknowledge a branch request', false);
+            }
+            const destination = event.payload.destination_site_id;
+            if (typeof destination !== 'string' || !/^[0-9a-f-]{36}$/i.test(destination)) {
+              throw contractError(422, 'INVALID_DESTINATION', 'Request acknowledgement destination is missing or invalid', false);
+            }
+          }
           if (event.device_sequence !== expected) {
             throw contractError(
               409,
@@ -170,6 +179,11 @@ export class SyncService {
       // broadcast them to every branch or trust a free-form site id alone.
       routes.push({
         eventType: 'shipment.dispatched',
+        site: { type: SiteType.KITCHEN },
+        payload: { path: ['destination_site_id'], equals: device.siteId },
+      });
+      routes.push({
+        eventType: 'kitchen_request.received',
         site: { type: SiteType.KITCHEN },
         payload: { path: ['destination_site_id'], equals: device.siteId },
       });

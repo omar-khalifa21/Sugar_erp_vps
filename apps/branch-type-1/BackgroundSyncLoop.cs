@@ -2,7 +2,7 @@ using SugarERP.Sync.Client;
 
 namespace SugarERP.Branch1;
 
-internal sealed class BackgroundSyncLoop(BranchSyncService sync, TimeSpan interval) : IAsyncDisposable
+internal sealed class BackgroundSyncLoop(BranchSyncService sync, TimeSpan interval, Func<Task>? refreshUi = null) : IAsyncDisposable
 {
     private readonly CancellationTokenSource _stop = new();
     private Task? _running;
@@ -22,6 +22,7 @@ internal sealed class BackgroundSyncLoop(BranchSyncService sync, TimeSpan interv
                 try
                 {
                     await sync.SynchronizeAsync(_stop.Token);
+                    if (refreshUi is not null) await refreshUi();
                 }
                 catch (OperationCanceledException) when (_stop.IsCancellationRequested)
                 {

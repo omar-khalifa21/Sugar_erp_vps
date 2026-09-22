@@ -138,13 +138,14 @@ public sealed class BranchSyncService(HttpClient httpClient, LocalDatabase datab
         {
             await using var db = database.CreateContext();
             var now = DateTimeOffset.UtcNow;
-            var job = await db.SideEffectJobs
+            var jobs = await db.SideEffectJobs
                 .Where(value => value.Kind == SideEffectKind.UploadShiftReport
                     && value.State != SideEffectState.Completed
-                    && value.State != SideEffectState.Failed
-                    && value.NextAttemptAtUtc <= now)
+                    && value.State != SideEffectState.Failed)
+                .ToListAsync(cancellationToken);
+            var job = jobs.Where(value => value.NextAttemptAtUtc <= now)
                 .OrderBy(value => value.CreatedAtUtc)
-                .FirstOrDefaultAsync(cancellationToken);
+                .FirstOrDefault();
             if (job is null) break;
             var artifact = await db.ReportArtifacts.SingleOrDefaultAsync(
                 value => value.ShiftId == job.SourceId && value.ReportVersion == job.DocumentVersion,
@@ -227,27 +228,51 @@ public sealed class BranchSyncService(HttpClient httpClient, LocalDatabase datab
         if (configuration is null) return new SyncRunResult(0, 0, 0, "سجّل الجهاز أولاً قبل المزامنة.", false);
 
         var now = DateTimeOffset.UtcNow;
-        // Versions before the Kitchen cafe-order fix permanently rejected these event types
-        // as WRONG_PROFILE. Re-open only that known server-side misclassification so real,
-        // already-created records can reach the server after an upgrade.
-        var recoverableWrongProfileEvents = await db.OutboxMessages
+        // Older clients could leave otherwise valid records permanently failed after
+        // server/profile fixes. Re-open only known recoverable classifications.
+        var recoverableFailedEvents = await db.OutboxMessages
             .Where(value => value.State == OutboxState.Failed
-                && value.LastErrorCode == "WRONG_PROFILE"
+                && ((value.LastErrorCode == "WRONG_PROFILE"
                 && (value.EventType == "custom_order.created"
                     || value.EventType == "custom_order.status_changed"
                     || value.EventType == "custom_customer.payment_recorded"
                     || value.EventType == "cafe_customer.created"
                     || value.EventType == "cafe_customer.price_list_updated"
                     || value.EventType == "cafe_customer.archived"))
+                || (value.EventType == "kitchen_request.submitted"
+                    && (value.LastErrorCode == "WRONG_PROFILE"
+                        || value.LastErrorCode == "KITCHEN_ROUTE_UNAVAILABLE"
+                        || value.LastErrorCode == "HTTP_500"
+                        || value.LastErrorCode == "HTTP_502"
+                        || value.LastErrorCode == "HTTP_503"
+                        || value.LastErrorCode == "HTTP_504"
+                        || value.LastErrorCode == "OFFLINE"
+                        || value.LastErrorCode == "TIMEOUT"
+                        || value.LastErrorCode == "INVALID_RESPONSE"))))
             .ToListAsync(cancellationToken);
-        if (recoverableWrongProfileEvents.Count > 0)
+        if (recoverableFailedEvents.Count > 0)
         {
-            foreach (var message in recoverableWrongProfileEvents)
+            foreach (var message in recoverableFailedEvents)
             {
                 message.State = OutboxState.Pending;
                 message.NextAttemptAtUtc = now;
                 message.LastErrorCode = null;
             }
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        // Version 1.2.3 used a five-minute maximum backoff. Clamp already-saved
+        // request retries during upgrade so recovery from the DNS outage happens
+        // promptly without recreating or skipping the original event.
+        var delayedRequests = await db.OutboxMessages
+            .Where(value => value.State == OutboxState.Pending
+                && value.EventType == "kitchen_request.submitted")
+            .ToListAsync(cancellationToken);
+        delayedRequests = delayedRequests
+            .Where(value => value.NextAttemptAtUtc > now.AddSeconds(60))
+            .ToList();
+        if (delayedRequests.Count > 0)
+        {
+            foreach (var message in delayedRequests) message.NextAttemptAtUtc = now;
             await db.SaveChangesAsync(cancellationToken);
         }
         var outstanding = await db.OutboxMessages
@@ -519,8 +544,8 @@ public sealed class BranchSyncService(HttpClient httpClient, LocalDatabase datab
             message.State = OutboxState.Pending;
             message.Attempts += 1;
             message.LastErrorCode = code;
-            var delaySeconds = Math.Min(300, Math.Pow(2, Math.Min(message.Attempts, 8)));
-            var jitteredSeconds = Math.Min(300, delaySeconds * (0.75 + Random.Shared.NextDouble() * 0.5));
+            var delaySeconds = Math.Min(60, Math.Pow(2, Math.Min(message.Attempts, 6)));
+            var jitteredSeconds = Math.Min(60, delaySeconds * (0.75 + Random.Shared.NextDouble() * 0.5));
             message.NextAttemptAtUtc = now.AddSeconds(jitteredSeconds);
         }
     }

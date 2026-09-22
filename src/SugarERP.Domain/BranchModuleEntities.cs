@@ -2,13 +2,14 @@ namespace SugarERP.Domain;
 
 public enum KitchenRequestStatus
 {
-    Draft,
-    Submitted,
-    Approved,
-    Rejected,
-    Partial,
-    Fulfilled,
-    Closed
+    Draft = 0,
+    Submitted = 1,
+    Approved = 2,
+    Rejected = 3,
+    Partial = 4,
+    Fulfilled = 5,
+    Closed = 6,
+    Received = 7
 }
 
 public enum ShipmentStatus

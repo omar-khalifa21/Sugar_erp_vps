@@ -344,6 +344,7 @@ public sealed class BranchModuleOperationsService(LocalDatabase database) : IBra
                 {
                     request_id = request.Id,
                     requesting_site_id = configuration.SiteId,
+                    branch_name = configuration.SiteName,
                     business_date = request.BusinessDate,
                     version = request.Version,
                     lines = request.Lines.Select(value => new
@@ -389,6 +390,7 @@ public sealed class BranchModuleOperationsService(LocalDatabase database) : IBra
             if (request.Version != expectedVersion)
                 throw Rule("STALE_VERSION", "تم تحديث طلب الوارد. أعد فتحه ثم حاول مرة أخرى.");
 
+            var configuration = await RequireBranchConfigurationAsync(db, cancellationToken);
             var now = DateTimeOffset.UtcNow;
             request.Status = KitchenRequestStatus.Submitted;
             request.SubmittedAtUtc = now;
@@ -397,6 +399,8 @@ public sealed class BranchModuleOperationsService(LocalDatabase database) : IBra
             QueueEvent(db, sequence, request.Id, "kitchen_request.submitted", now, new
             {
                 request_id = request.Id,
+                requesting_site_id = configuration.SiteId,
+                branch_name = configuration.SiteName,
                 business_date = request.BusinessDate,
                 version = request.Version,
                 lines = request.Lines.Select(value => new
@@ -2223,7 +2227,7 @@ public sealed class BranchModuleOperationsService(LocalDatabase database) : IBra
     private static RequestDeliveryState ResolveDeliveryState(KitchenRequest request, OutboxState? outboxState)
     {
         if (request.Status == KitchenRequestStatus.Draft) return RequestDeliveryState.Draft;
-        if (request.Status is KitchenRequestStatus.Approved or KitchenRequestStatus.Rejected
+        if (request.Status is KitchenRequestStatus.Received or KitchenRequestStatus.Approved or KitchenRequestStatus.Rejected
             || request.Lines.Any(value => value.SentScaled > 0)) return RequestDeliveryState.Received;
         return outboxState switch
         {

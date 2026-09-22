@@ -9,6 +9,8 @@ namespace SugarERP.Kitchen;
 
 public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
 {
+    private readonly SemaphoreSlim _syncGate = new(1, 1);
+
     public async Task EnrollAsync(Uri api, string token, string deviceName)
     {
         await using (var existing = store.Open())
@@ -28,26 +30,49 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
         finally { store.WriteLock.Release(); }
     }
 
-    public async Task<int> PullAsync()
+    public async Task<int> PullAsync(CancellationToken cancellationToken = default, bool forceRetry = false)
     {
-        await FlushAsync();
-        await BootstrapAsync();
-        var total = 0;
-        while (true)
+        await _syncGate.WaitAsync(cancellationToken);
+        try
         {
-            var result = await PullPageAsync();
-            total += result.Applied;
-            if (!result.HasMore) return total;
+            await RecoverMissingRequestAcknowledgementsAsync(cancellationToken);
+            await FlushAsync(cancellationToken, forceRetry);
+            await BootstrapAsync(cancellationToken);
+            var total = 0;
+            while (true)
+            {
+                var result = await PullPageAsync(cancellationToken);
+                total += result.Applied;
+                if (!result.HasMore) break;
+            }
+            // Applying a branch request queues a durable receipt acknowledgement.
+            // Send it in the same automatic cycle so the branch does not remain at
+            // "sent" until the next polling interval.
+            await FlushAsync(cancellationToken, forceRetry);
+            await using (var state = store.Open())
+            {
+                var blocked = await state.Outbox.AsNoTracking().OrderBy(value => value.Sequence)
+                    .FirstOrDefaultAsync(value => !value.Acknowledged, cancellationToken);
+                if (blocked is not null)
+                {
+                    var detail = blocked.PermanentlyFailed
+                        ? $"تعذر إرسال عملية محفوظة ({blocked.LastErrorCode ?? "SYNC_REJECTED"}). راجع الإدارة؛ لم تُحذف العملية."
+                        : "توجد عمليات محفوظة بانتظار الاتصال بالخادم، وستتم إعادة إرسالها تلقائياً.";
+                    throw new InvalidOperationException(detail);
+                }
+            }
+            return total;
         }
+        finally { _syncGate.Release(); }
     }
-    private async Task BootstrapAsync()
+    private async Task BootstrapAsync(CancellationToken cancellationToken)
     {
         await using var read = store.Open();
         var configuration = await read.Configuration.AsNoTracking().SingleAsync();
         using var request = new HttpRequestMessage(HttpMethod.Get, configuration.ApiBaseUrl + "/sync/bootstrap");
         request.Headers.Add("x-device-id", configuration.DeviceId.ToString()); request.Headers.Add("x-device-secret", DeviceCredentialProtector.Unprotect(configuration.ProtectedCredential));
-        using var response = await http.SendAsync(request); response.EnsureSuccessStatusCode();
-        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        using var response = await http.SendAsync(request, cancellationToken); response.EnsureSuccessStatusCode();
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
         var catalog = document.RootElement.GetProperty("catalog").EnumerateArray().ToDictionary(x => x.GetProperty("id").GetGuid());
         await store.WriteLock.WaitAsync();
         try
@@ -93,13 +118,13 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
         finally { store.WriteLock.Release(); }
     }
     private static long ParseInteger(JsonElement value, bool allowZero = false) { var parsed = value.ValueKind == JsonValueKind.String ? long.Parse(value.GetString()!, System.Globalization.CultureInfo.InvariantCulture) : value.GetInt64(); if (parsed < 0 || (!allowZero && parsed == 0)) throw new IOException("Invalid central quantity"); return parsed; }
-    private async Task<(int Applied, bool HasMore)> PullPageAsync()
+    private async Task<(int Applied, bool HasMore)> PullPageAsync(CancellationToken cancellationToken)
     {
         await using var read = store.Open();
         var configuration = await read.Configuration.AsNoTracking().SingleAsync();
         var connection = Connect(configuration);
-        var page = await new CentralApiClient(http).PullAsync(connection, configuration.Cursor, 100);
-        await store.WriteLock.WaitAsync();
+        var page = await new CentralApiClient(http).PullAsync(connection, configuration.Cursor, 100, cancellationToken);
+        await store.WriteLock.WaitAsync(cancellationToken);
         try
         {
             await using var db = store.Open();
@@ -119,7 +144,7 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
             current.Cursor = page.Cursor;
             await db.SaveChangesAsync();
             await transaction.CommitAsync();
-            await new CentralApiClient(http).AcknowledgeAsync(connection, page.Cursor);
+            await new CentralApiClient(http).AcknowledgeAsync(connection, page.Cursor, cancellationToken);
             if (page.HasMore && page.Cursor == configuration.Cursor) throw new IOException("Sync cursor did not advance");
             return (applied, page.HasMore);
         }
@@ -135,7 +160,7 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
             await using var transaction = await db.Database.BeginTransactionAsync();
             var configuration = await db.Configuration.SingleAsync();
             var request = await db.Requests.Include(x => x.Lines).SingleAsync(x => x.Id == requestId);
-            if (request.Status is "FULFILLED" or "REJECTED") throw new InvalidOperationException("الطلب مغلق.");
+            if (request.Status is "FULFILLED" or "SENT" or "REJECTED") throw new InvalidOperationException("الطلب مغلق.");
             var selected = request.Lines.Where(x => quantities.GetValueOrDefault(x.Id) > 0).ToArray();
             if (selected.Length == 0 || selected.Any(x => quantities[x.Id] > x.RequestedScaled - x.SentScaled)) throw new InvalidOperationException("كمية الإرسال غير صالحة.");
             var recipes = await db.Recipes.Include(x => x.Components).Where(x => selected.Select(line => line.ItemId).Contains(x.ProductItemId)).ToDictionaryAsync(x => x.ProductItemId);
@@ -152,7 +177,7 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
             var now = DateTimeOffset.UtcNow;
             var payload = new {
                 shipment_id = shipmentId, request_id = request.Id, destination_site_id = request.BranchSiteId,
-                reference = $"K-{now:yyyyMMdd}-{configuration.NextDeviceSequence:000000}", version = 1, dispatched_at = now.ToString("O"),
+                reference = $"K-{now:yyyyMMdd}-{configuration.NextDeviceSequence:000000}", version = 1, finalized = true, dispatched_at = now.ToString("O"),
                 lines = selected.Select(x => new { line_id = Guid.NewGuid(), request_line_id = x.Id, item_id = x.ItemId,
                     sent_scaled = quantities[x.Id], quantity_scale = x.QuantityScale, name_snapshot = x.Name, unit_snapshot = x.Unit }).ToArray(),
                 recipe_snapshot = recipeSnapshot,
@@ -162,7 +187,7 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
             using var document = JsonDocument.Parse(contractEvent.PayloadJson);
             var upload = new SyncUploadEvent(contractEvent.Id, contractEvent.DeviceSequence, contractEvent.EventType, contractEvent.SchemaVersion,
                 contractEvent.OccurredAtUtc.ToString("O"), document.RootElement.Clone(), [], contractEvent.ContentHash);
-            var queued = new KitchenOutbox { EventId = upload.Id, RequestId = requestId, Sequence = upload.DeviceSequence, UploadJson = JsonSerializer.Serialize(upload), AppliedLocally = true };
+            var queued = new KitchenOutbox { EventId = upload.Id, RequestId = requestId, Sequence = upload.DeviceSequence, UploadJson = JsonSerializer.Serialize(upload), AppliedLocally = true, NextAttemptAtUtc = now };
             db.Outbox.Add(queued);
             foreach (var line in selected) line.SentScaled = checked(line.SentScaled + quantities[line.Id]);
             foreach (var use in ingredientUse)
@@ -172,7 +197,10 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
                     DeltaScaled = -use.Value, RecipeSnapshotJson = upload.Payload.GetProperty("recipe_snapshot").GetRawText(), OccurredAtUtc = now });
             }
             request.Version++;
-            request.Status = request.Lines.All(x => x.SentScaled >= x.RequestedScaled) ? "FULFILLED" : "PARTIAL";
+            // Confirm & Send finalizes the request even when the kitchen cannot supply
+            // every requested unit. The exact shipped quantities remain on the immutable
+            // shipment and are what the branch must count.
+            request.Status = "FULFILLED";
             configuration.NextDeviceSequence++;
             await db.SaveChangesAsync();
             await transaction.CommitAsync();
@@ -215,7 +243,7 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
             var contractEvent = ContractEventFactory.Create(id, configuration.NextDeviceSequence, "custom_order.created", now, payload);
             using var document = JsonDocument.Parse(contractEvent.PayloadJson);
             var upload = new SyncUploadEvent(contractEvent.Id, contractEvent.DeviceSequence, contractEvent.EventType, contractEvent.SchemaVersion, contractEvent.OccurredAtUtc.ToString("O"), document.RootElement.Clone(), [], contractEvent.ContentHash);
-            var queued = new KitchenOutbox { EventId = id, RequestId = id, Sequence = upload.DeviceSequence, UploadJson = JsonSerializer.Serialize(upload), AppliedLocally = true };
+            var queued = new KitchenOutbox { EventId = id, RequestId = id, Sequence = upload.DeviceSequence, UploadJson = JsonSerializer.Serialize(upload), AppliedLocally = true, NextAttemptAtUtc = now };
             configuration.NextDeviceSequence++;
             db.CustomOrders.Add(order); db.Outbox.Add(queued); await db.SaveChangesAsync(); await transaction.CommitAsync();
             return ToSnapshot(order);
@@ -278,7 +306,7 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
             var payload = new { operation_id = eventId, reason = reason.Trim(), lines = selected.Select(x => new { line_id = Guid.NewGuid(), item_id = x.Key, quantity_scaled = x.Value.ToString() }).ToArray() };
             var contractEvent = ContractEventFactory.Create(eventId, configuration.NextDeviceSequence, eventType, now, payload); using var document = JsonDocument.Parse(contractEvent.PayloadJson);
             var upload = new SyncUploadEvent(contractEvent.Id, contractEvent.DeviceSequence, contractEvent.EventType, contractEvent.SchemaVersion, contractEvent.OccurredAtUtc.ToString("O"), document.RootElement.Clone(), [], contractEvent.ContentHash);
-            var queued = new KitchenOutbox { EventId = eventId, RequestId = eventId, Sequence = upload.DeviceSequence, UploadJson = JsonSerializer.Serialize(upload), AppliedLocally = true };
+            var queued = new KitchenOutbox { EventId = eventId, RequestId = eventId, Sequence = upload.DeviceSequence, UploadJson = JsonSerializer.Serialize(upload), AppliedLocally = true, NextAttemptAtUtc = now };
             var multiplier = eventType == "ingredient.received" ? 1L : -1L;
             foreach (var input in selected)
             {
@@ -305,7 +333,7 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
             var payload = new { count_id = eventId, business_date = date, lines = balances.Select(x => new { line_id = Guid.NewGuid(), item_id = x.ItemId, actual_scaled = counts[x.ItemId].ToString(), recorded_waste_scaled = todayWaste.GetValueOrDefault(x.ItemId).ToString() }).ToArray() };
             var contractEvent = ContractEventFactory.Create(eventId, configuration.NextDeviceSequence, "ingredient.counted", now, payload); using var document = JsonDocument.Parse(contractEvent.PayloadJson);
             var upload = new SyncUploadEvent(contractEvent.Id, contractEvent.DeviceSequence, contractEvent.EventType, contractEvent.SchemaVersion, contractEvent.OccurredAtUtc.ToString("O"), document.RootElement.Clone(), [], contractEvent.ContentHash);
-            var queued = new KitchenOutbox { EventId = eventId, RequestId = eventId, Sequence = upload.DeviceSequence, UploadJson = JsonSerializer.Serialize(upload), AppliedLocally = true };
+            var queued = new KitchenOutbox { EventId = eventId, RequestId = eventId, Sequence = upload.DeviceSequence, UploadJson = JsonSerializer.Serialize(upload), AppliedLocally = true, NextAttemptAtUtc = now };
             foreach (var balance in balances)
             {
                 var actual = counts[balance.ItemId]; var delta = actual - balance.QuantityScaled; balance.QuantityScaled = actual; balance.Version++;
@@ -318,29 +346,60 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
         finally { store.WriteLock.Release(); }
     }
 
-    public async Task FlushAsync()
+    public async Task FlushAsync(CancellationToken cancellationToken = default, bool forceRetry = false)
     {
-        await store.WriteLock.WaitAsync();
+        await store.WriteLock.WaitAsync(cancellationToken);
         try
         {
             await using var db = store.Open();
             while (true)
             {
-                var pending = await db.Outbox.Where(x => !x.Acknowledged).OrderBy(x => x.Sequence).FirstOrDefaultAsync();
+                var pending = await db.Outbox.Where(x => !x.Acknowledged).OrderBy(x => x.Sequence)
+                    .FirstOrDefaultAsync(cancellationToken);
                 if (pending is null) break;
-                await SendPendingAsync(db, pending, await db.Configuration.SingleAsync());
+                if (pending.PermanentlyFailed)
+                    throw new InvalidOperationException($"رفض الخادم عملية محفوظة ({pending.LastErrorCode ?? "SYNC_REJECTED"}). لم تُحذف وتحتاج مراجعة.");
+                if (!forceRetry && pending.NextAttemptAtUtc > DateTimeOffset.UtcNow) break;
+                var configuration = await db.Configuration.SingleAsync(cancellationToken);
+                try
+                {
+                    await SendPendingAsync(db, pending, configuration, cancellationToken);
+                }
+                catch (CentralApiException exception)
+                {
+                    MarkFailure(pending, exception.Code, exception.SafeMessage, exception.Retryable);
+                    await db.SaveChangesAsync(cancellationToken);
+                    if (!exception.Retryable)
+                        throw new InvalidOperationException($"رفض الخادم عملية محفوظة ({exception.Code}). لم تُحذف وتحتاج مراجعة.", exception);
+                    break;
+                }
+                catch (HttpRequestException exception)
+                {
+                    MarkFailure(pending, "OFFLINE", exception.Message, true);
+                    await db.SaveChangesAsync(cancellationToken);
+                    break;
+                }
+                catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    MarkFailure(pending, "TIMEOUT", "انتهت مهلة الاتصال بالخادم.", true);
+                    await db.SaveChangesAsync(cancellationToken);
+                    break;
+                }
             }
         }
         finally { store.WriteLock.Release(); }
     }
 
-    private async Task SendPendingAsync(KitchenDbContext db, KitchenOutbox pending, KitchenConfiguration configuration)
+    private async Task SendPendingAsync(KitchenDbContext db, KitchenOutbox pending, KitchenConfiguration configuration, CancellationToken cancellationToken)
     {
         var upload = JsonSerializer.Deserialize<SyncUploadEvent>(pending.UploadJson)!;
-        var response = await new CentralApiClient(http).PushAsync(Connect(configuration), configuration.StreamEpoch, [upload]);
-        if (response.Results.Length != 1 || response.Results[0].Id != upload.Id || response.Results[0].Status is not ("accepted" or "duplicate"))
-            throw new InvalidOperationException("رفض الخادم الشحنة؛ بقيت محفوظة لإعادة المحاولة.");
-        await using var transaction = await db.Database.BeginTransactionAsync();
+        var response = await new CentralApiClient(http).PushAsync(Connect(configuration), configuration.StreamEpoch, [upload], cancellationToken);
+        if (response.Results.Length != 1 || response.Results[0].Id != upload.Id)
+            throw new CentralApiException("INVALID_SYNC_RESPONSE", "وصل رد مزامنة غير مكتمل.", true, 502);
+        var result = response.Results[0];
+        if (result.Status is not ("accepted" or "duplicate"))
+            throw new CentralApiException(result.Code ?? result.ErrorCode ?? "SYNC_REJECTED", "رفض الخادم العملية؛ بقيت محفوظة.", result.Retryable ?? result.Status == "retryable", 409);
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         if (!pending.AppliedLocally && upload.EventType == "shipment.dispatched") {
         var request = await db.Requests.Include(x => x.Lines).SingleAsync(x => x.Id == pending.RequestId);
         foreach (var row in upload.Payload.GetProperty("lines").EnumerateArray())
@@ -365,23 +424,102 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
         configuration.NextDeviceSequence = Math.Max(configuration.NextDeviceSequence, response.NextExpectedSequence);
         pending.AppliedLocally = true;
         pending.Acknowledged = true;
-        await db.SaveChangesAsync();
-        await transaction.CommitAsync();
+        pending.LastErrorCode = null;
+        pending.LastErrorMessage = null;
+        pending.PermanentlyFailed = false;
+        await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    private static void MarkFailure(KitchenOutbox pending, string code, string message, bool retryable)
+    {
+        pending.Attempts = checked(pending.Attempts + 1);
+        pending.LastErrorCode = code;
+        pending.LastErrorMessage = message.Length <= 500 ? message : message[..500];
+        pending.PermanentlyFailed = !retryable;
+        var baseDelay = Math.Min(60, Math.Pow(2, Math.Min(pending.Attempts, 6)));
+        var seconds = Math.Min(60, baseDelay * (0.8 + Random.Shared.NextDouble() * 0.4));
+        pending.NextAttemptAtUtc = DateTimeOffset.UtcNow.AddSeconds(seconds);
     }
 
     private static DeviceConnection Connect(KitchenConfiguration c) => new(new Uri(c.ApiBaseUrl), c.DeviceId, DeviceCredentialProtector.Unprotect(c.ProtectedCredential));
+
+    private async Task RecoverMissingRequestAcknowledgementsAsync(CancellationToken cancellationToken)
+    {
+        await store.WriteLock.WaitAsync(cancellationToken);
+        try
+        {
+            await using var db = store.Open();
+            var requests = await db.Requests.Where(value => value.Status == "REQUESTED").ToListAsync(cancellationToken);
+            if (requests.Count == 0) return;
+            var queued = await db.Outbox.ToListAsync(cancellationToken);
+            foreach (var request in requests)
+            {
+                var alreadyQueued = queued.Any(value => value.RequestId == request.Id
+                    && value.UploadJson.Contains("kitchen_request.received", StringComparison.Ordinal));
+                if (!alreadyQueued) QueueRequestAcknowledgement(db, request, null);
+                request.Status = "RECEIVED";
+            }
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        finally { store.WriteLock.Release(); }
+    }
+
     private static void ApplyRequest(KitchenDbContext db, SyncPulledEvent incoming)
     {
         var p = incoming.Payload; var requestId = p.GetProperty("request_id").GetGuid();
         if (db.Requests.Any(x => x.Id == requestId)) return;
         var request = new KitchenRequestRecord { Id = requestId, BranchSiteId = incoming.OriginSiteId,
             BranchName = p.TryGetProperty("branch_name", out var name) ? name.GetString()! : incoming.OriginSiteId.ToString()[..8],
-            Version = p.GetProperty("version").GetInt32(), SubmittedAtUtc = DateTimeOffset.Parse(incoming.OccurredAt) };
+            Status = "RECEIVED", Version = p.GetProperty("version").GetInt32(), SubmittedAtUtc = DateTimeOffset.Parse(incoming.OccurredAt) };
         foreach (var row in p.GetProperty("lines").EnumerateArray()) request.Lines.Add(new KitchenRequestLineRecord {
             Id = row.GetProperty("line_id").GetGuid(), ItemId = row.GetProperty("item_id").GetGuid(),
             Name = row.GetProperty("name_snapshot").GetString()!, Unit = row.GetProperty("unit_snapshot").GetString()!,
             QuantityScale = checked((int)ReadQuantity(row.GetProperty("quantity_scale"))), RequestedScaled = ReadQuantity(row.GetProperty("requested_scaled")) });
         db.Requests.Add(request);
+
+        QueueRequestAcknowledgement(db, request, incoming.Id);
+    }
+
+    private static void QueueRequestAcknowledgement(KitchenDbContext db, KitchenRequestRecord request, Guid? sourceEventId)
+    {
+        var configuration = db.Configuration.Single();
+        var acknowledgedAt = DateTimeOffset.UtcNow;
+        var acknowledgementId = Guid.NewGuid();
+        var contractEvent = ContractEventFactory.Create(
+            acknowledgementId,
+            configuration.NextDeviceSequence,
+            "kitchen_request.received",
+            acknowledgedAt,
+            new
+            {
+                request_id = request.Id,
+                destination_site_id = request.BranchSiteId,
+                status = "RECEIVED",
+                version = checked(request.Version + 1),
+                received_at = acknowledgedAt.ToString("O")
+            },
+            sourceEventId is Guid dependency ? [dependency] : []);
+        using var document = JsonDocument.Parse(contractEvent.PayloadJson);
+        var upload = new SyncUploadEvent(
+            contractEvent.Id,
+            contractEvent.DeviceSequence,
+            contractEvent.EventType,
+            contractEvent.SchemaVersion,
+            contractEvent.OccurredAtUtc.ToString("O"),
+            document.RootElement.Clone(),
+            sourceEventId is Guid dependencyId ? [dependencyId.ToString()] : [],
+            contractEvent.ContentHash);
+        db.Outbox.Add(new KitchenOutbox
+        {
+            EventId = acknowledgementId,
+            RequestId = request.Id,
+            Sequence = configuration.NextDeviceSequence,
+            UploadJson = JsonSerializer.Serialize(upload),
+            AppliedLocally = true,
+            NextAttemptAtUtc = acknowledgedAt
+        });
+        configuration.NextDeviceSequence += 1;
     }
     private static void ApplyReceipt(KitchenDbContext db, SyncPulledEvent incoming)
     {

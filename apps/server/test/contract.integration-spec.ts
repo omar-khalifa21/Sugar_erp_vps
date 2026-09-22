@@ -271,6 +271,18 @@ describe('Contract v1 sync (PostgreSQL integration)', () => {
     expect(kitchenEvents.map((event) => event.id)).toContain(submitted.id);
     expect(kitchenEvents.find((event) => event.id === submitted.id)?.origin_site_id).toBe(siteId);
 
+    const receivedByKitchen = {
+      id: randomUUID(), device_sequence: 1, event_type: 'kitchen_request.received', schema_version: 1,
+      occurred_at: '2026-09-09T19:01:00.000Z', dependencies: [submitted.id],
+      payload: { request_id: requestId, destination_site_id: siteId, status: 'RECEIVED', version: 2,
+        received_at: '2026-09-09T19:01:00.000Z' },
+    };
+    const kitchenHeaders = { 'x-device-id': kitchenDevice.body.device.id, 'x-device-secret': kitchenDevice.body.credential };
+    await request(app.getHttpServer()).post('/api/v1/sync/push').set(kitchenHeaders)
+      .send({ contract_version: '1.0', stream_epoch: 1,
+        events: [{ ...receivedByKitchen, content_hash: computeEventHash(receivedByKitchen) }] }).expect(200);
+    expect(await prisma.kitchenRequest.findUnique({ where: { id: requestId } })).toMatchObject({ status: 'RECEIVED', version: 2 });
+
     await request(app.getHttpServer()).get('/api/v1/admin/kitchen/requests').expect(401);
     const view = await request(app.getHttpServer())
       .get('/api/v1/admin/kitchen/requests')
@@ -282,26 +294,27 @@ describe('Contract v1 sync (PostgreSQL integration)', () => {
     const shipmentId = randomUUID();
     const shipmentLineId = randomUUID();
     const dispatched = {
-      id: randomUUID(), device_sequence: 1, event_type: 'shipment.dispatched', schema_version: 1,
+      id: randomUUID(), device_sequence: 2, event_type: 'shipment.dispatched', schema_version: 1,
       occurred_at: '2026-09-09T19:05:00.000Z', dependencies: [] as string[],
-      payload: { shipment_id: shipmentId, request_id: requestId, destination_site_id: siteId, reference: 'KIT-TEST-1', version: 1,
-        lines: [{ line_id: shipmentLineId, request_line_id: requestLineId, item_id: item.id, sent_scaled: '10' }],
-        recipe_snapshot: [{ product_item_id: item.id, output_scaled: '10', recipe_version: 1, components: [{ ingredient_item_id: ingredient.id, quantity_scaled: '20' }] }],
-        ingredient_lines: [{ ingredient_item_id: ingredient.id, quantity_scaled: '20' }] },
+      payload: { shipment_id: shipmentId, request_id: requestId, destination_site_id: siteId, reference: 'KIT-TEST-1', version: 1, finalized: true,
+        lines: [{ line_id: shipmentLineId, request_line_id: requestLineId, item_id: item.id, sent_scaled: '8' }],
+        recipe_snapshot: [{ product_item_id: item.id, output_scaled: '8', recipe_version: 1, components: [{ ingredient_item_id: ingredient.id, quantity_scaled: '16' }] }],
+        ingredient_lines: [{ ingredient_item_id: ingredient.id, quantity_scaled: '16' }] },
     };
-    const kitchenHeaders = { 'x-device-id': kitchenDevice.body.device.id, 'x-device-secret': kitchenDevice.body.credential };
     await request(app.getHttpServer()).post('/api/v1/sync/push').set(kitchenHeaders)
       .send({ contract_version: '1.0', stream_epoch: 1, events: [{ ...dispatched, content_hash: computeEventHash(dispatched) }] }).expect(200);
+    expect(await prisma.kitchenRequest.findUnique({ where: { id: requestId } })).toMatchObject({ status: 'FULFILLED' });
     const branchPull = await request(app.getHttpServer()).get('/api/v1/sync/pull?limit=100')
       .set({ 'x-device-id': deviceId, 'x-device-secret': deviceSecret }).expect(200);
     const branchPullBody = branchPull.body as { events: { id: string }[] };
+    expect(branchPullBody.events.some((entry) => entry.id === receivedByKitchen.id)).toBe(true);
     expect(branchPullBody.events.some((entry) => entry.id === dispatched.id)).toBe(true);
 
     const received = {
       id: randomUUID(), device_sequence: 4, event_type: 'incoming_receipt.accepted', schema_version: 1,
       occurred_at: '2026-09-09T19:10:00.000Z', dependencies: [] as string[],
       payload: { receipt_id: randomUUID(), shipment_id: shipmentId,
-        lines: [{ receipt_line_id: randomUUID(), shipment_line_id: shipmentLineId, counted_scaled: '10' }] },
+        lines: [{ receipt_line_id: randomUUID(), shipment_line_id: shipmentLineId, counted_scaled: '8' }] },
     };
     const branchHeaders = { 'x-device-id': deviceId, 'x-device-secret': deviceSecret };
     const acceptedReceipt = { ...received, content_hash: computeEventHash(received) };
@@ -343,7 +356,7 @@ describe('Contract v1 sync (PostgreSQL integration)', () => {
         lines: [{ line_id: requestLineId, item_id: transferItemId, requested_scaled: '3', quantity_scale: 1, name_snapshot: 'Integration product', unit_snapshot: 'pcs' }] } };
     await request(app.getHttpServer()).post('/api/v1/sync/push').set(headers).send({ contract_version: '1.0', stream_epoch: 1,
       events: [{ ...submitted, content_hash: computeEventHash(submitted) }] }).expect(200);
-    const dispatched = { id: randomUUID(), device_sequence: 2, event_type: 'shipment.dispatched', schema_version: 1,
+    const dispatched = { id: randomUUID(), device_sequence: 3, event_type: 'shipment.dispatched', schema_version: 1,
       occurred_at: new Date().toISOString(), dependencies: [] as string[], payload: { shipment_id: shipmentId, request_id: requestId,
         destination_site_id: branch.id, reference: 'KIT-B2-1', version: 1,
         lines: [{ line_id: shipmentLineId, request_line_id: requestLineId, item_id: transferItemId, sent_scaled: '3' }],

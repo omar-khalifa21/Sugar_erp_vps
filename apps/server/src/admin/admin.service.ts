@@ -389,10 +389,12 @@ export class AdminService {
       })),
       requests: requests.map((row) => ({
         id: row.id, branch: row.requestingSite, status: row.status,
+        workflow_status: row.status === 'REQUESTED' || row.status === 'RECEIVED' ? 'PENDING' : 'SENT',
         submitted_at: row.submittedAt.toISOString(), line_count: row.lines.length,
       })),
       shipments: shipments.map((row) => ({
-        id: row.id, reference: row.reference, branch: row.destinationSite, status: row.status,
+        id: row.id, request_id: row.requestId, reference: row.reference, branch: row.destinationSite, status: row.status,
+        workflow_status: row.status === 'CONFLICT' ? 'CONFLICTED' : row.status === 'RECEIVED' || row.status === 'RESOLVED' ? 'CONFIRMED' : 'SENT',
         dispatched_at: row.dispatchedAt.toISOString(), line_count: row.lines.length,
         receipt_status: row.receipt?.status ?? null,
       })),

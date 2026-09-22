@@ -562,6 +562,7 @@ public sealed partial class BranchPosViewModel
 
     private async Task ReloadRequestHistoryAsync()
     {
+        var selectedId = SelectedRequest?.Id;
         var requests = await _moduleOperations.GetKitchenRequestsAsync();
         RequestHistoryRows.Clear();
         foreach (var request in requests)
@@ -577,10 +578,20 @@ public sealed partial class BranchPosViewModel
                 RequestDeliveryArabic(request.DeliveryState, request.Status),
                 approved == 0 && sent == 0 ? "لم يعتمد أو يشحن بعد" : $"معتمد {approved} · مشحون {sent}"));
         }
-        SelectedRequest = RequestHistoryRows.FirstOrDefault();
+        SelectedRequest = selectedId is null
+            ? RequestHistoryRows.FirstOrDefault()
+            : RequestHistoryRows.FirstOrDefault(value => value.Id == selectedId) ?? RequestHistoryRows.FirstOrDefault();
         RequestStatusText = requests.Count == 0
             ? "لا توجد طلبات وارد بعد. أدخل الكميات واضغط إرسال."
             : $"يوجد {requests.Count} طلب وارد محفوظ. الطلب المرسل لا يزيد المخزون حتى وصول شحنة وعدّها.";
+    }
+
+    public async Task RefreshAfterBackgroundSyncAsync()
+    {
+        if (IsBusy) return;
+        await RefreshSnapshotAsync();
+        await ReloadRequestHistoryAsync();
+        await ReloadIncomingShipmentsAsync();
     }
 
     private async Task SaveRequestAsync(bool submit)
@@ -657,6 +668,11 @@ public sealed partial class BranchPosViewModel
         foreach (var item in catalog.Items.Where(value => value.Active).OrderBy(value => value.NameAr))
             ManualIncomingRows.Add(new QuantityEntryRowViewModel(item.Id, item.NameAr, item.Unit, item.QuantityScale,
                 ArabicDisplay.Quantity(item.QuantityScaled, item.QuantityScale, item.Unit)));
+        await ReloadIncomingShipmentsAsync();
+    }
+
+    private async Task ReloadIncomingShipmentsAsync()
+    {
         var selectedId = SelectedIncoming?.Id;
         var shipments = await _moduleOperations.GetIncomingShipmentsAsync();
         HasIncomingShipments = shipments.Count > 0;
@@ -1328,6 +1344,7 @@ public sealed partial class BranchPosViewModel
     {
         KitchenRequestStatus.Draft => "مسودة",
         KitchenRequestStatus.Submitted => "مرسل للمطبخ",
+        KitchenRequestStatus.Received => "استلمه المطبخ",
         KitchenRequestStatus.Approved => "معتمد",
         KitchenRequestStatus.Rejected => "مرفوض",
         KitchenRequestStatus.Partial => "شحن جزئي",

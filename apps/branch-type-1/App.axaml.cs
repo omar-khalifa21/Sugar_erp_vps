@@ -39,7 +39,8 @@ public sealed partial class App : Avalonia.Application
                 var viewModel = new BranchPosViewModel(operations, moduleOperations, shiftReportWriter, printer, enrollment, sync,
                     DeploymentConfiguration.Create(DesktopApplicationType.BranchType1).Version);
                 desktop.MainWindow = new MainWindow(viewModel, database, _httpClient, options.IsTouch);
-                _backgroundSync = new BackgroundSyncLoop(sync, TimeSpan.FromSeconds(15));
+                _backgroundSync = new BackgroundSyncLoop(sync, TimeSpan.FromSeconds(15), () =>
+                    Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(viewModel.RefreshAfterBackgroundSyncAsync));
                 desktop.MainWindow.Opened += (_, _) => _backgroundSync.Start();
                 desktop.Exit += async (_, _) =>
                 {

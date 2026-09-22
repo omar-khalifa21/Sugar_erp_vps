@@ -108,14 +108,14 @@ internal static class IncomingSyncApplier
             var applied = 0;
             foreach (var incoming in page.Events)
             {
-                var addressedKitchenShipment = incoming.EventType == "shipment.dispatched"
+                var addressedKitchenEvent = incoming.EventType is "shipment.dispatched" or "kitchen_request.received"
                     && incoming.OriginSiteId != configuration.SiteId
                     && incoming.Payload.TryGetProperty("destination_site_id", out var destination)
                     && destination.ValueKind == JsonValueKind.String
                     && Guid.TryParse(destination.GetString(), out var destinationSiteId)
                     && destinationSiteId == configuration.SiteId;
                 if (incoming.Id == Guid.Empty
-                    || (incoming.OriginSiteId != configuration.SiteId && !addressedKitchenShipment)
+                    || (incoming.OriginSiteId != configuration.SiteId && !addressedKitchenEvent)
                     || incoming.DeviceSequence < 1
                     || incoming.SchemaVersion < 1
                     || !long.TryParse(incoming.ServerPosition, out var position)
@@ -177,6 +177,7 @@ internal static class IncomingSyncApplier
             case "kitchen_request.updated":
             case "kitchen_request.approved":
             case "kitchen_request.rejected":
+            case "kitchen_request.received":
                 await ApplyRequestUpdateAsync(db, incoming.Payload, cancellationToken);
                 break;
             case "quantity_conflict.decided":
@@ -281,6 +282,27 @@ internal static class IncomingSyncApplier
         if (shipment.Lines.Count == 0 || shipment.Lines.Select(value => value.ItemId).Distinct().Count() != shipment.Lines.Count)
             throw InvalidPayload();
         db.Shipments.Add(shipment);
+
+        if (shipment.RequestId is Guid requestId)
+        {
+            var request = await db.KitchenRequests.Include(value => value.Lines)
+                .SingleOrDefaultAsync(value => value.Id == requestId, cancellationToken);
+            if (request is null)
+                throw new CentralApiException("DEPENDENCY_NOT_READY", "وصلت شحنة لطلب وارد غير موجود محلياً.", true, 409);
+            foreach (var line in shipment.Lines)
+            {
+                if (line.RequestLineId is not Guid requestLineId) throw InvalidPayload();
+                var requestLine = request.Lines.SingleOrDefault(value => value.Id == requestLineId)
+                    ?? throw InvalidPayload();
+                requestLine.SentScaled = checked(requestLine.SentScaled + line.SentScaled);
+            }
+            var finalized = incoming.Payload.TryGetProperty("finalized", out var finalizedValue)
+                && finalizedValue.ValueKind == JsonValueKind.True;
+            request.Status = finalized || request.Lines.All(value => value.SentScaled >= value.RequestedScaled)
+                ? KitchenRequestStatus.Fulfilled
+                : KitchenRequestStatus.Partial;
+            request.Version = checked(request.Version + 1);
+        }
     }
 
     private static async Task ApplyRequestUpdateAsync(BranchDbContext db, JsonElement payload, CancellationToken cancellationToken)
@@ -292,6 +314,7 @@ internal static class IncomingSyncApplier
         if (version <= request.Version) return;
         request.Status = RequiredString(payload, "status") switch
         {
+            "RECEIVED" => KitchenRequestStatus.Received,
             "APPROVED" => KitchenRequestStatus.Approved,
             "REJECTED" => KitchenRequestStatus.Rejected,
             "PARTIAL" => KitchenRequestStatus.Partial,

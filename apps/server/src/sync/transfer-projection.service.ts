@@ -57,6 +57,7 @@ export class TransferProjectionService {
   async apply(tx: Client, event: SyncEventDto, siteId: string, profile: DeviceProfile) {
     switch (event.event_type) {
       case 'kitchen_request.submitted': return this.request(tx, event, siteId, profile);
+      case 'kitchen_request.received': return this.requestReceived(tx, event, siteId, profile);
       case 'shipment.dispatched': return this.shipment(tx, event, siteId, profile);
       case 'ingredient.received': return this.ingredientMovement(tx, event, siteId, profile, 'RECEIPT');
       case 'ingredient.waste': return this.ingredientMovement(tx, event, siteId, profile, 'WASTE');
@@ -365,6 +366,7 @@ export class TransferProjectionService {
     if (request.status === 'REJECTED' || request.status === 'CANCELLED' || request.status === 'FULFILLED')
       error('REQUEST_FROZEN', 'Request cannot receive another shipment', 409);
     const rows = lines(payload.lines);
+    const finalized = payload.finalized === true;
     const seen = new Set<string>();
     for (const line of rows) {
       const requestLineId = id(line.request_line_id);
@@ -416,7 +418,7 @@ export class TransferProjectionService {
     }
     const dispatched = new Map(rows.map((line) => [id(line.request_line_id), quantity(line.sent_scaled)]));
     const remaining = request.lines.some((line) => line.sentScaled + (dispatched.get(line.id) ?? 0n) < line.requestedScaled);
-    await tx.kitchenRequest.update({ where: { id: requestId }, data: { status: remaining ? 'PARTIAL' : 'FULFILLED', version: { increment: 1 } } });
+    await tx.kitchenRequest.update({ where: { id: requestId }, data: { status: finalized || !remaining ? 'FULFILLED' : 'PARTIAL', version: { increment: 1 } } });
   }
 
   private async receipt(tx: Client, event: SyncEventDto, siteId: string, profile: DeviceProfile) {
@@ -500,6 +502,21 @@ export class TransferProjectionService {
         version: Number(payload.version) || 1,
       })) },
     } });
+  }
+
+  private async requestReceived(tx: Client, event: SyncEventDto, siteId: string, profile: DeviceProfile) {
+    if (profile !== DeviceProfile.KITCHEN) error('WRONG_PROFILE', 'Only the kitchen can acknowledge a branch request', 403);
+    const payload = object(event.payload);
+    const requestId = id(payload.request_id);
+    const destinationSiteId = id(payload.destination_site_id);
+    const request = await tx.kitchenRequest.findUnique({ where: { id: requestId } });
+    if (!request) error('DEPENDENCY_NOT_READY', 'Branch request has not reached the server', 409);
+    if (request.kitchenSiteId !== siteId || request.requestingSiteId !== destinationSiteId)
+      error('WRONG_SITE', 'Request acknowledgement does not match its kitchen and branch', 403);
+    if (payload.status !== 'RECEIVED') error('INVALID_TRANSFER', 'Request acknowledgement status is invalid');
+    if (request.status === 'REQUESTED') {
+      await tx.kitchenRequest.update({ where: { id: requestId }, data: { status: 'RECEIVED', version: { increment: 1 } } });
+    }
   }
 
   private async archiveCafeCustomer(tx: Client, event: SyncEventDto, siteId: string, profile: DeviceProfile) {

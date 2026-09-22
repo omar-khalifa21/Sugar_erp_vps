@@ -62,6 +62,11 @@ describe('SyncService routing', () => {
               site: { type: SiteType.KITCHEN },
               payload: { path: ['destination_site_id'], equals: siteId },
             },
+            {
+              eventType: 'kitchen_request.received',
+              site: { type: SiteType.KITCHEN },
+              payload: { path: ['destination_site_id'], equals: siteId },
+            },
           ],
           serverPosition: { gt: 0n },
         },

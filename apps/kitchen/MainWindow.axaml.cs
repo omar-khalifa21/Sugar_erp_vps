@@ -6,14 +6,19 @@ using SugarERP.Infrastructure.Local;
 using Avalonia.Platform.Storage;
 using SugarERP.Application;
 using SugarERP.Domain;
+using SugarERP.Sync.Client;
 using System.Globalization;
 using System.Runtime.Versioning;
+using System.Text.Json;
+using Avalonia.Media;
 using SugarERP.Desktop.Shared;
 
 namespace SugarERP.Kitchen.App;
 public sealed partial class MainWindow : Window
 {
     private readonly KitchenStore _store; private readonly KitchenSyncService _sync; private KitchenRequestRecord? _selected;
+    private WaredRow[] _waredRows = [];
+    private string _waredFilter = "PENDING";
     private bool _busy;
     private readonly CancellationTokenSource _backgroundStop = new();
     private readonly HttpClient _updateHttp = new() { Timeout = TimeSpan.FromMinutes(10) };
@@ -30,14 +35,19 @@ public sealed partial class MainWindow : Window
     private TextBox EnrollmentToken => this.FindControl<TextBox>("EnrollmentToken")!;
     private TextBox DeviceName => this.FindControl<TextBox>("DeviceName")!;
     public MainWindow() { InitializeComponent(); _store = null!; _sync = null!; }
-    public MainWindow(KitchenStore store, KitchenSyncService sync) { InitializeComponent(); _store = store; _sync = sync; DeviceName.Text = Environment.MachineName; ApiUrl.Text = _deployment.ApiBaseUrl.ToString().TrimEnd('/'); this.FindControl<TextBox>("ReportsDirectory")!.Text = _reports.GetDirectory(); this.FindControl<ComboBox>("PrinterName")!.ItemsSource = new WindowsRasterBranchPrinter().GetInstalledPrinterNames(); Opened += async (_, _) => { await RefreshAsync(); _ = RunBackgroundSyncAsync(_backgroundStop.Token); _ = RunPeriodicUpdateChecksAsync(_backgroundStop.Token); }; Closed += (_, _) => { _backgroundStop.Cancel(); _updateHttp.Dispose(); }; }
+    public MainWindow(KitchenStore store, KitchenSyncService sync) { InitializeComponent(); _store = store; _sync = sync; DeviceName.Text = Environment.MachineName; ApiUrl.Text = _deployment.ApiBaseUrl.ToString().TrimEnd('/'); this.FindControl<TextBox>("ReportsDirectory")!.Text = _reports.GetDirectory(); this.FindControl<ComboBox>("PrinterName")!.ItemsSource = new WindowsRasterBranchPrinter().GetInstalledPrinterNames(); Opened += async (_, _) => { SetConnectionState("SYNCING"); await RefreshAsync(); _ = RunBackgroundSyncAsync(_backgroundStop.Token); _ = RunPeriodicUpdateChecksAsync(_backgroundStop.Token); }; Closed += (_, _) => { _backgroundStop.Cancel(); _updateHttp.Dispose(); }; }
     private async Task RefreshAsync()
     {
         await using var db = _store.Open();
         var requests = (await db.Requests.AsNoTracking().Include(x => x.Lines).ToListAsync()).OrderByDescending(x => x.SubmittedAtUtc).ToArray();
-        var activeRequests = requests.Where(x => x.Status is not ("FULFILLED" or "REJECTED")).ToArray();
-        RequestsList.ItemsSource = requests;
-        this.FindControl<DataGrid>("ReceiptsGrid")!.ItemsSource = (await db.Receipts.AsNoTracking().ToListAsync()).OrderByDescending(x => x.CountedAtUtc).ToArray();
+        var activeRequests = requests.Where(x => x.Status is not ("FULFILLED" or "SENT" or "REJECTED")).ToArray();
+        var shipmentOutbox = (await db.Outbox.AsNoTracking().Where(x => x.UploadJson.Contains("shipment.dispatched")).OrderByDescending(x => x.Sequence).ToListAsync())
+            .Select(ParseUpload).Where(x => x is not null).Cast<SyncUploadEvent>().ToArray();
+        var receipts = await db.Receipts.AsNoTracking().OrderByDescending(x => x.CountedAtUtc).ToListAsync();
+        var selectedRequestId = (RequestsList.SelectedItem as WaredRow)?.Request.Id;
+        _waredRows = requests.Select(request => WaredRow.Create(request,
+            shipmentOutbox.FirstOrDefault(x => x.Payload.TryGetProperty("request_id", out var requestId) && requestId.GetGuid() == request.Id), receipts)).ToArray();
+        ApplyWaredFilter(selectedRequestId);
         this.FindControl<DataGrid>("ReturnsGrid")!.ItemsSource = (await db.Returns.AsNoTracking().ToListAsync()).OrderByDescending(x => x.DispatchedAtUtc).ToArray();
         var ingredients = await db.Ingredients.AsNoTracking().OrderBy(x => x.Name).ToListAsync();
         var ingredientsById = ingredients.ToDictionary(x => x.ItemId);
@@ -80,6 +90,7 @@ public sealed partial class MainWindow : Window
         var customOrders = await _sync.GetCustomOrdersAsync();
         this.FindControl<DataGrid>("CustomOrdersGrid")!.ItemsSource = customOrders.Select(x => new KitchenOrderRow(x)).ToArray();
         var configuration = await db.Configuration.AsNoTracking().SingleOrDefaultAsync();
+        this.FindControl<StackPanel>("EnrollmentPanel")!.IsVisible = configuration is null;
         if (configuration is not null && !string.IsNullOrWhiteSpace(configuration.PrinterName)) this.FindControl<ComboBox>("PrinterName")!.SelectedItem = configuration.PrinterName;
         var pendingSync = await db.Outbox.AsNoTracking().CountAsync(x => !x.Acknowledged);
         this.FindControl<TextBlock>("PendingSyncCount")!.Text = pendingSync.ToString(CultureInfo.CurrentCulture);
@@ -90,27 +101,76 @@ public sealed partial class MainWindow : Window
         this.FindControl<TextBlock>("HomeRequests")!.Text = $"{activeRequests.Length} طلب قيد التنفيذ";
         this.FindControl<TextBlock>("HomeOrders")!.Text = $"{customOrders.Count(x => x.Status is not (CustomOrderStatus.Delivered or CustomOrderStatus.Cancelled))} طلب مفتوح";
         this.FindControl<TextBlock>("ServerStatusText")!.Text = configuration is null ? "الجهاز غير مربوط بالخادم" : $"مرتبط بـ {configuration.SiteName}";
-        this.FindControl<TextBlock>("SyncStateText")!.Text = pendingSync == 0 ? "متزامن" : $"{pendingSync} بانتظار الإرسال";
     }
     private void Home_Click(object? sender, RoutedEventArgs e) => this.FindControl<TabControl>("MainTabs")!.SelectedIndex = 0;
     private void OpenRequests_Click(object? sender, RoutedEventArgs e) => this.FindControl<TabControl>("MainTabs")!.SelectedIndex = 1;
-    private void OpenStock_Click(object? sender, RoutedEventArgs e) => this.FindControl<TabControl>("MainTabs")!.SelectedIndex = 4;
-    private void OpenRecipes_Click(object? sender, RoutedEventArgs e) => this.FindControl<TabControl>("MainTabs")!.SelectedIndex = 5;
-    private void OpenOrders_Click(object? sender, RoutedEventArgs e) => this.FindControl<TabControl>("MainTabs")!.SelectedIndex = 6;
-    private void OpenSettings_Click(object? sender, RoutedEventArgs e) => this.FindControl<TabControl>("MainTabs")!.SelectedIndex = 7;
+    private void OpenStock_Click(object? sender, RoutedEventArgs e) => this.FindControl<TabControl>("MainTabs")!.SelectedIndex = 3;
+    private void OpenRecipes_Click(object? sender, RoutedEventArgs e) => this.FindControl<TabControl>("MainTabs")!.SelectedIndex = 4;
+    private void OpenOrders_Click(object? sender, RoutedEventArgs e) => this.FindControl<TabControl>("MainTabs")!.SelectedIndex = 5;
+    private void OpenSettings_Click(object? sender, RoutedEventArgs e) => this.FindControl<TabControl>("MainTabs")!.SelectedIndex = 6;
+    private static SyncUploadEvent? ParseUpload(KitchenOutbox row)
+    {
+        try
+        {
+            var upload = JsonSerializer.Deserialize<SyncUploadEvent>(row.UploadJson);
+            return upload?.EventType == "shipment.dispatched" ? upload : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+    private void ApplyWaredFilter(Guid? selectedRequestId = null)
+    {
+        this.FindControl<Button>("PendingFilter")!.Content = $"Pending · قيد الانتظار ({_waredRows.Count(x => x.Status == "PENDING")})";
+        this.FindControl<Button>("SentFilter")!.Content = $"Sent · تم الإرسال ({_waredRows.Count(x => x.Status == "SENT")})";
+        this.FindControl<Button>("ConfirmedFilter")!.Content = $"Confirmed · مؤكد ({_waredRows.Count(x => x.Status == "CONFIRMED")})";
+        this.FindControl<Button>("ConflictedFilter")!.Content = $"Conflicted · مختلف ({_waredRows.Count(x => x.Status == "CONFLICTED")})";
+        var filtered = _waredRows.Where(x => x.Status == _waredFilter).OrderByDescending(x => x.SortAt).ToArray();
+        RequestsList.ItemsSource = filtered;
+        RequestsList.SelectedItem = filtered.FirstOrDefault(x => x.Request.Id == selectedRequestId) ?? filtered.FirstOrDefault();
+        if (filtered.Length == 0)
+        {
+            _selected = null;
+            SelectedTitle.Text = "لا توجد طلبات في هذه الحالة";
+            this.FindControl<TextBlock>("SelectedSubtitle")!.Text = "ستظهر التغييرات هنا تلقائياً.";
+            LinesGrid.ItemsSource = null;
+            this.FindControl<Button>("DispatchButton")!.IsVisible = false;
+        }
+    }
+    private void SetWaredFilter(string status)
+    {
+        _waredFilter = status;
+        ApplyWaredFilter();
+    }
+    private void PendingFilter_Click(object? sender, RoutedEventArgs e) => SetWaredFilter("PENDING");
+    private void SentFilter_Click(object? sender, RoutedEventArgs e) => SetWaredFilter("SENT");
+    private void ConfirmedFilter_Click(object? sender, RoutedEventArgs e) => SetWaredFilter("CONFIRMED");
+    private void ConflictedFilter_Click(object? sender, RoutedEventArgs e) => SetWaredFilter("CONFLICTED");
+    private void SetConnectionState(string state)
+    {
+        var badge = this.FindControl<Border>("SyncBadge")!;
+        var text = this.FindControl<TextBlock>("SyncStateText")!;
+        (text.Text, text.Foreground, badge.Background) = state switch
+        {
+            "CONNECTED" => ("Connected · متصل", Brush.Parse("#237A49"), Brush.Parse("#E9F8EF")),
+            "SYNCING" => ("Syncing · جارٍ المزامنة", Brush.Parse("#175CD3"), Brush.Parse("#EAF2FF")),
+            _ => ("Offline · غير متصل", Brush.Parse("#B42318"), Brush.Parse("#FDECEC"))
+        };
+    }
     private void RecipeSearch_Changed(object? sender, TextChangedEventArgs e)
     {
         var search = this.FindControl<TextBox>("RecipeSearch")?.Text?.Trim() ?? "";
         this.FindControl<DataGrid>("RecipesGrid")!.ItemsSource = _recipeRows.Where(x => search.Length == 0 || x.ProductName.Contains(search, StringComparison.CurrentCultureIgnoreCase)).ToArray();
     }
-    private async void Enroll_Click(object? sender, RoutedEventArgs e) { await Run(async () => { await _sync.EnrollAsync(new Uri(ApiUrl.Text!.Trim()), EnrollmentToken.Text!.Trim(), DeviceName.Text!.Trim()); EnrollmentToken.Text = ""; return "تم ربط جهاز المطبخ."; }); }
-    private async void Sync_Click(object? sender, RoutedEventArgs e) { await Run(async () => $"اكتملت المزامنة؛ تم تطبيق {await _sync.PullAsync()} تحديث."); await RefreshAsync(); }
+    private async void Enroll_Click(object? sender, RoutedEventArgs e) { await Run(async () => { SetConnectionState("SYNCING"); await _sync.EnrollAsync(new Uri(ApiUrl.Text!.Trim()), EnrollmentToken.Text!.Trim(), DeviceName.Text!.Trim()); EnrollmentToken.Text = ""; var applied = await _sync.PullAsync(forceRetry: true); SetConnectionState("CONNECTED"); return $"تم ربط جهاز المطبخ وبدأت المزامنة التلقائية — {applied} تحديث."; }); await RefreshAsync(); }
+    private async void Sync_Click(object? sender, RoutedEventArgs e) { SetConnectionState("SYNCING"); await Run(async () => { var applied = await _sync.PullAsync(forceRetry: true); SetConnectionState("CONNECTED"); return $"اكتملت المزامنة؛ تم تطبيق {applied} تحديث."; }); await RefreshAsync(); }
     private async void Update_Click(object? sender, RoutedEventArgs e)
     {
         if (_availableUpdate is null) { await CheckForUpdatesAsync(true); return; }
         await Run(async () =>
         {
-            await _sync.PullAsync();
+            await _sync.PullAsync(forceRetry: true);
             await using var db = _store.Open();
             if (await db.Outbox.AnyAsync(x => !x.Acknowledged)) throw new InvalidOperationException("التحديث ينتظر إرسال كل عمليات المطبخ المحفوظة.");
             StatusText.Text = "Downloading update...";
@@ -145,22 +205,28 @@ public sealed partial class MainWindow : Window
     }
     private void Request_Selected(object? sender, SelectionChangedEventArgs e)
     {
-        _selected = RequestsList.SelectedItem as KitchenRequestRecord; if (_selected is null) return;
-        SelectedTitle.Text = $"تجهيز طلب {_selected.BranchName}";
-        LinesGrid.ItemsSource = _selected.Lines.Select(x => new DispatchLine(x)).ToList();
+        if (RequestsList.SelectedItem is not WaredRow row) return;
+        _selected = row.Request;
+        SelectedTitle.Text = $"{row.BranchName} · {row.Reference}";
+        this.FindControl<TextBlock>("SelectedSubtitle")!.Text = row.CanDispatch
+            ? "راجع الكمية المطلوبة، عدّل ما سيرسله المطبخ، ثم اضغط Confirm & Send. اكتب 0 للصنف غير المتاح."
+            : $"الحالة: {row.Status} · هذه نسخة الشحنة المسجلة ولا يمكن تعديلها.";
+        LinesGrid.ItemsSource = row.Request.Lines.Select(x => new DispatchLine(x, row.ShippedQuantities.GetValueOrDefault(x.Id), row.CanDispatch)).ToList();
+        LinesGrid.IsReadOnly = !row.CanDispatch;
+        this.FindControl<Button>("DispatchButton")!.IsVisible = row.CanDispatch;
     }
     private async void Dispatch_Click(object? sender, RoutedEventArgs e)
     {
         if (_busy) return;
         if (_selected is null) { StatusText.Text = "اختر طلباً أولاً."; return; }
-        var rows = (LinesGrid.ItemsSource as IEnumerable<DispatchLine>)!.ToArray();
+        var rows = (LinesGrid.ItemsSource as IEnumerable<DispatchLine>)?.ToArray() ?? [];
         var confirm = new Window { Title = "تأكيد إرسال الشحنة", Width = 480, Height = 220, CanResize = false, WindowStartupLocation = WindowStartupLocation.CenterOwner };
         var send = new Button { Content = "تأكيد الإرسال", IsDefault = true };
         var cancel = new Button { Content = "إلغاء", IsCancel = true };
         send.Click += (_, _) => confirm.Close(true); cancel.Click += (_, _) => confirm.Close(false);
         confirm.Content = new StackPanel { Margin = new Avalonia.Thickness(18), Spacing = 14, Children = { new TextBlock { Text = $"تأكيد إرسال الكميات المحددة إلى {_selected.BranchName}؟", TextWrapping = Avalonia.Media.TextWrapping.Wrap }, send, cancel } };
         if (!await confirm.ShowDialog<bool>(this)) return;
-        await Run(async () => { await _sync.DispatchAsync(_selected.Id, rows.ToDictionary(x => x.Id, x => x.SendScaled)); return "تم حفظ الشحنة على الخادم ولن يتكرر الإرسال عند إعادة المحاولة."; });
+        await Run(async () => { await _sync.DispatchAsync(_selected.Id, rows.ToDictionary(x => x.Id, x => x.SendScaled)); return "تم تأكيد الشحنة وحفظها؛ ستصل للفرع تلقائياً دون تكرار."; });
         await RefreshAsync();
     }
     private async Task Run(Func<Task<string>> action) { if (_busy) return; _busy = true; try { SyncButton.IsEnabled = false; StatusText.Text = "جارٍ تنفيذ العملية..."; StatusText.Text = await action(); } catch (Exception ex) { StatusText.Text = ex.Message; } finally { _busy = false; SyncButton.IsEnabled = true; } }
@@ -171,9 +237,9 @@ public sealed partial class MainWindow : Window
         {
             if (!_busy)
             {
-                try { cancellationToken.ThrowIfCancellationRequested(); var applied = await _sync.PullAsync(); await RefreshAsync(); StatusText.Text = applied == 0 ? "Synced" : $"Synced — applied {applied} updates"; }
-                catch (InvalidOperationException ex) when (ex.Message.Contains("اربط", StringComparison.Ordinal)) { }
-                catch (Exception) { StatusText.Text = "Offline — saved changes will retry automatically"; }
+                try { cancellationToken.ThrowIfCancellationRequested(); SetConnectionState("SYNCING"); var applied = await _sync.PullAsync(cancellationToken); await RefreshAsync(); SetConnectionState("CONNECTED"); StatusText.Text = applied == 0 ? "متصل — المزامنة التلقائية تعمل" : $"تمت المزامنة تلقائياً — {applied} تحديث"; }
+                catch (InvalidOperationException ex) when (ex.Message.Contains("اربط", StringComparison.Ordinal)) { SetConnectionState("OFFLINE"); StatusText.Text = "اربط الجهاز مرة واحدة؛ بعدها سيكون الاتصال تلقائياً."; }
+                catch (Exception ex) { SetConnectionState("OFFLINE"); StatusText.Text = $"Offline — التغييرات محفوظة وستُعاد تلقائياً: {ex.Message}"; }
             }
         } while (await timer.WaitForNextTickAsync(cancellationToken));
     }
@@ -248,11 +314,50 @@ public sealed class RecipeRow
     public string ComponentsDisplay { get; init; } = "";
     public int Version { get; init; }
 }
+public sealed class WaredRow
+{
+    private WaredRow(KitchenRequestRecord request, string status, string reference, DateTimeOffset sortAt, IReadOnlyDictionary<Guid, long> shippedQuantities)
+    {
+        Request = request;
+        Status = status;
+        Reference = reference;
+        SortAt = sortAt;
+        ShippedQuantities = shippedQuantities;
+    }
+    public KitchenRequestRecord Request { get; }
+    public string BranchName => Request.BranchName;
+    public string Status { get; }
+    public string Reference { get; }
+    public DateTimeOffset SortAt { get; }
+    public string SubmittedDisplay => SortAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
+    public string ItemCountDisplay => $"{Request.Lines.Count} أصناف";
+    public bool CanDispatch => Status == "PENDING";
+    public IReadOnlyDictionary<Guid, long> ShippedQuantities { get; }
+    public static WaredRow Create(KitchenRequestRecord request, SyncUploadEvent? shipment, IReadOnlyCollection<KitchenReceiptRecord> receipts)
+    {
+        if (shipment is null)
+            return new WaredRow(request, "PENDING", $"REQ-{request.Id.ToString("N")[..8].ToUpperInvariant()}", request.SubmittedAtUtc, new Dictionary<Guid, long>());
+        var payload = shipment.Payload;
+        var shipmentId = payload.GetProperty("shipment_id").GetGuid();
+        var receipt = receipts.FirstOrDefault(x => x.ShipmentId == shipmentId);
+        var status = receipt?.Status switch { "ACCEPTED" => "CONFIRMED", "DISPUTED" => "CONFLICTED", _ => "SENT" };
+        var quantities = payload.GetProperty("lines").EnumerateArray().ToDictionary(
+            x => x.GetProperty("request_line_id").GetGuid(),
+            x => ReadLong(x.GetProperty("sent_scaled")));
+        var reference = payload.TryGetProperty("reference", out var referenceValue) ? referenceValue.GetString() ?? shipmentId.ToString("N") : shipmentId.ToString("N");
+        var occurredAt = DateTimeOffset.TryParse(shipment.OccurredAt, out var parsed) ? parsed : request.SubmittedAtUtc;
+        return new WaredRow(request, status, reference, occurredAt, quantities);
+    }
+    private static long ReadLong(JsonElement value) => value.ValueKind == JsonValueKind.String
+        ? long.Parse(value.GetString()!, CultureInfo.InvariantCulture)
+        : value.GetInt64();
+}
 public sealed class DispatchLine
 {
     private readonly KitchenRequestLineRecord _line;
-    public DispatchLine(KitchenRequestLineRecord line) { _line = line; SendDisplay = ((decimal)(line.RequestedScaled - line.SentScaled) / line.QuantityScale).ToString("0.###"); }
+    public DispatchLine(KitchenRequestLineRecord line, long shippedScaled, bool editable) { _line = line; var amount = editable ? line.RequestedScaled - line.SentScaled : shippedScaled; SendDisplay = ((decimal)Math.Max(0, amount) / line.QuantityScale).ToString("0.###"); }
     public Guid Id => _line.Id; public string Name => _line.Name; public string RequestedDisplay => $"{(decimal)_line.RequestedScaled / _line.QuantityScale:0.###} {_line.Unit}"; public string SentDisplay => $"{(decimal)_line.SentScaled / _line.QuantityScale:0.###} {_line.Unit}"; public string SendDisplay { get; set; }
+    public string ChangeDisplay { get { try { var sent = SendScaled; return sent == 0 ? "غير متاح" : sent == _line.RequestedScaled ? "مطابق" : sent < _line.RequestedScaled ? "أقل من المطلوب" : "أعلى من المطلوب"; } catch { return "راجع الكمية"; } } }
     public long SendScaled => decimal.TryParse(SendDisplay, out var value) && value >= 0 && decimal.Truncate(value * _line.QuantityScale) == value * _line.QuantityScale ? checked((long)(value * _line.QuantityScale)) : throw new InvalidOperationException($"كمية {_line.Name} غير صالحة.");
 }
 public sealed record CafeCustomerOption(Guid Id, string Name) { public override string ToString() => Name; }

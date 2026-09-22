@@ -69,6 +69,11 @@ public sealed class KitchenOutbox
     public string UploadJson { get; set; } = "";
     public bool Acknowledged { get; set; }
     public bool AppliedLocally { get; set; }
+    public int Attempts { get; set; }
+    public DateTimeOffset NextAttemptAtUtc { get; set; }
+    public string? LastErrorCode { get; set; }
+    public string? LastErrorMessage { get; set; }
+    public bool PermanentlyFailed { get; set; }
 }
 public sealed class KitchenReceiptRecord
 {
@@ -172,7 +177,7 @@ public sealed class KitchenStore
         await using var db = Open();
         await db.Database.EnsureCreatedAsync();
         // Additive upgrade for Kitchen 0.1 databases; never replace enrolled data.
-        await db.Database.ExecuteSqlRawAsync("CREATE TABLE IF NOT EXISTS outbox (EventId TEXT NOT NULL PRIMARY KEY, RequestId TEXT NOT NULL, Sequence INTEGER NOT NULL, UploadJson TEXT NOT NULL, Acknowledged INTEGER NOT NULL DEFAULT 0, AppliedLocally INTEGER NOT NULL DEFAULT 0); CREATE UNIQUE INDEX IF NOT EXISTS IX_outbox_Sequence ON outbox(Sequence);");
+        await db.Database.ExecuteSqlRawAsync("CREATE TABLE IF NOT EXISTS outbox (EventId TEXT NOT NULL PRIMARY KEY, RequestId TEXT NOT NULL, Sequence INTEGER NOT NULL, UploadJson TEXT NOT NULL, Acknowledged INTEGER NOT NULL DEFAULT 0, AppliedLocally INTEGER NOT NULL DEFAULT 0, Attempts INTEGER NOT NULL DEFAULT 0, NextAttemptAtUtc TEXT NOT NULL DEFAULT '0001-01-01T00:00:00+00:00', LastErrorCode TEXT NULL, LastErrorMessage TEXT NULL, PermanentlyFailed INTEGER NOT NULL DEFAULT 0); CREATE UNIQUE INDEX IF NOT EXISTS IX_outbox_Sequence ON outbox(Sequence);");
         await db.Database.ExecuteSqlRawAsync("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;");
         await db.Database.ExecuteSqlRawAsync("CREATE TABLE IF NOT EXISTS shipment_receipts (EventId TEXT NOT NULL PRIMARY KEY, ShipmentId TEXT NOT NULL, ReceiptId TEXT NOT NULL, BranchSiteId TEXT NOT NULL, Status TEXT NOT NULL, PayloadJson TEXT NOT NULL, CountedAtUtc TEXT NOT NULL); CREATE UNIQUE INDEX IF NOT EXISTS IX_shipment_receipts_ReceiptId ON shipment_receipts(ReceiptId);");
         await db.Database.ExecuteSqlRawAsync("CREATE TABLE IF NOT EXISTS kitchen_returns (EventId TEXT NOT NULL PRIMARY KEY, ReturnId TEXT NOT NULL, BranchSiteId TEXT NOT NULL, Reference TEXT NOT NULL, PayloadJson TEXT NOT NULL, DispatchedAtUtc TEXT NOT NULL); CREATE UNIQUE INDEX IF NOT EXISTS IX_kitchen_returns_ReturnId ON kitchen_returns(ReturnId);");
@@ -184,6 +189,11 @@ public sealed class KitchenStore
         await AddColumnAsync(db, "ALTER TABLE configuration ADD COLUMN PrinterName TEXT NOT NULL DEFAULT ''");
         await AddColumnAsync(db, "ALTER TABLE configuration ADD COLUMN NextCustomOrderSequence INTEGER NOT NULL DEFAULT 1");
         await AddColumnAsync(db, "ALTER TABLE outbox ADD COLUMN AppliedLocally INTEGER NOT NULL DEFAULT 0");
+        await AddColumnAsync(db, "ALTER TABLE outbox ADD COLUMN Attempts INTEGER NOT NULL DEFAULT 0");
+        await AddColumnAsync(db, "ALTER TABLE outbox ADD COLUMN NextAttemptAtUtc TEXT NOT NULL DEFAULT '0001-01-01T00:00:00+00:00'");
+        await AddColumnAsync(db, "ALTER TABLE outbox ADD COLUMN LastErrorCode TEXT NULL");
+        await AddColumnAsync(db, "ALTER TABLE outbox ADD COLUMN LastErrorMessage TEXT NULL");
+        await AddColumnAsync(db, "ALTER TABLE outbox ADD COLUMN PermanentlyFailed INTEGER NOT NULL DEFAULT 0");
         await AddColumnAsync(db, "ALTER TABLE cafe_customers ADD COLUMN HiddenLocally INTEGER NOT NULL DEFAULT 0");
         var configuration = await db.Configuration.SingleOrDefaultAsync();
         var highestSequence = await db.Outbox.Select(x => (int?)x.Sequence).MaxAsync() ?? 0;

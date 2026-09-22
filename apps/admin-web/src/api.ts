@@ -137,8 +137,8 @@ export interface KitchenOverview {
     unexplained_variance_scaled: string;
     cost_minor_per_scale: string | null;
   }>;
-  requests: Array<{ id: string; branch: { id: string; name: string }; status: string; submitted_at: string; line_count: number }>;
-  shipments: Array<{ id: string; reference: string; branch: { id: string; name: string }; status: string; dispatched_at: string; line_count: number; receipt_status: string | null }>;
+  requests: Array<{ id: string; branch: { id: string; name: string }; status: string; workflow_status: 'PENDING' | 'SENT'; submitted_at: string; line_count: number }>;
+  shipments: Array<{ id: string; request_id: string; reference: string; branch: { id: string; name: string }; status: string; workflow_status: 'SENT' | 'CONFIRMED' | 'CONFLICTED'; dispatched_at: string; line_count: number; receipt_status: string | null }>;
 }
 
 export interface KitchenRecipe {
