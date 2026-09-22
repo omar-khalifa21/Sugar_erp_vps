@@ -82,6 +82,7 @@ describe('Contract v1 sync (PostgreSQL integration)', () => {
     if (kitchenSiteId) {
       await prisma.cafeInvoiceLine.deleteMany({ where: { invoice: { issuingSiteId: kitchenSiteId } } });
       await prisma.cafeInvoice.deleteMany({ where: { issuingSiteId: kitchenSiteId } });
+      await prisma.cafePriceRevision.deleteMany({ where: { customer: { originSiteId: kitchenSiteId } } });
       await prisma.cafeItemPrice.deleteMany({ where: { customer: { originSiteId: kitchenSiteId } } });
       await prisma.cafeCustomer.deleteMany({ where: { originSiteId: kitchenSiteId } });
       await prisma.ingredientVariance.deleteMany({ where: { siteId: kitchenSiteId } });
@@ -116,8 +117,8 @@ describe('Contract v1 sync (PostgreSQL integration)', () => {
       await prisma.recipeComponent.deleteMany({ where: { recipe: { productItemId: kitchenTestProductId } } });
       await prisma.recipe.deleteMany({ where: { productItemId: kitchenTestProductId } });
     }
-    if (kitchenTestProductId) await prisma.item.delete({ where: { id: kitchenTestProductId } });
-    if (kitchenTestIngredientId) await prisma.item.delete({ where: { id: kitchenTestIngredientId } });
+    if (kitchenTestProductId) await prisma.item.deleteMany({ where: { id: kitchenTestProductId } });
+    if (kitchenTestIngredientId) await prisma.item.deleteMany({ where: { id: kitchenTestIngredientId } });
     await app.close();
   });
 
@@ -560,14 +561,14 @@ describe('Contract v1 sync (PostgreSQL integration)', () => {
       const response = await request(app.getHttpServer()).post('/api/v1/sync/push').set(headers).send(upload).expect(200);
       return { event, upload, response };
     };
-    const received = await post(3, 'ingredient.received', { operation_id: randomUUID(), reason: 'Supplier delivery',
+    const received = await post(4, 'ingredient.received', { operation_id: randomUUID(), reason: 'Supplier delivery',
       lines: [{ line_id: randomUUID(), item_id: ingredientItemId, quantity_scaled: '10' }] });
     await request(app.getHttpServer()).post('/api/v1/sync/push').set(headers).send(received.upload).expect(200);
     expect((await prisma.stockBalance.findFirstOrThrow({ where: { siteId: kitchenSiteId, itemId: ingredientItemId, location: 'KITCHEN' } })).quantityScaled).toBe(84n);
-    await post(4, 'ingredient.waste', { operation_id: randomUUID(), reason: 'Damaged ingredient',
+    await post(5, 'ingredient.waste', { operation_id: randomUUID(), reason: 'Damaged ingredient',
       lines: [{ line_id: randomUUID(), item_id: ingredientItemId, quantity_scaled: '4' }] });
     const countLineId = randomUUID();
-    await post(5, 'ingredient.counted', { count_id: randomUUID(), business_date: new Date().toISOString().slice(0, 10),
+    await post(6, 'ingredient.counted', { count_id: randomUUID(), business_date: new Date().toISOString().slice(0, 10),
       lines: [{ line_id: countLineId, item_id: ingredientItemId, actual_scaled: '78', recorded_waste_scaled: '4' }] });
     expect((await prisma.stockBalance.findFirstOrThrow({ where: { siteId: kitchenSiteId, itemId: ingredientItemId, location: 'KITCHEN' } })).quantityScaled).toBe(78n);
     expect(await prisma.ingredientVariance.findUnique({ where: { id: countLineId } })).toMatchObject({ expectedScaled: 80n, actualScaled: 78n, recordedWasteScaled: 4n, unexplainedVarianceScaled: 2n });
@@ -584,26 +585,26 @@ describe('Contract v1 sync (PostgreSQL integration)', () => {
       return upload;
     };
     kitchenTestProductId = randomUUID(); kitchenTestIngredientId = randomUUID();
-    await post(6, 'catalog.item.updated', { item_id: kitchenTestIngredientId, site_id: kitchenSiteId,
+    await post(7, 'catalog.item.updated', { item_id: kitchenTestIngredientId, site_id: kitchenSiteId,
       sku: `AUTO-${kitchenTestIngredientId}`, name_ar: 'Integration Flour', unit: 'g', quantity_scale: 1,
       retail_price_minor: 0, kind: 'INGREDIENT', active: true, version: 1 });
-    await post(7, 'catalog.item.updated', { item_id: kitchenTestProductId, site_id: kitchenSiteId,
+    await post(8, 'catalog.item.updated', { item_id: kitchenTestProductId, site_id: kitchenSiteId,
       sku: `AUTO-${kitchenTestProductId}`, name_ar: 'Integration Cake', unit: 'piece', quantity_scale: 1,
       retail_price_minor: 50_000, kind: 'PRODUCT', active: true, version: 1 });
-    await post(8, 'recipe.updated', { product_item_id: kitchenTestProductId, output_scaled: '1', version: 1,
+    await post(9, 'recipe.updated', { product_item_id: kitchenTestProductId, output_scaled: '1', version: 1,
       components: [{ ingredient_item_id: kitchenTestIngredientId, quantity_scaled: '500' }] });
-    await post(9, 'ingredient.received', { operation_id: randomUUID(), reason: 'Supplier purchase',
+    await post(10, 'ingredient.received', { operation_id: randomUUID(), reason: 'Supplier purchase',
       lines: [{ line_id: randomUUID(), item_id: kitchenTestIngredientId, quantity_scaled: '1000', total_cost_minor: '50000' }] });
     const cafeId = randomUUID();
-    await post(10, 'cafe_customer.created', { customer_id: cafeId, site_id: kitchenSiteId,
+    await post(11, 'cafe_customer.created', { customer_id: cafeId, site_id: kitchenSiteId,
       name: 'Integration Cafe', phone: '01000000000', kind: 'Cafe', version: 1,
       prices: [{ item_id: kitchenTestProductId, unit_price_minor: 50_000 }] });
     const invoiceId = randomUUID();
-    await post(11, 'custom_order.created', { custom_order_id: invoiceId, customer_id: cafeId, site_id: kitchenSiteId,
+    await post(12, 'custom_order.created', { custom_order_id: invoiceId, customer_id: cafeId, site_id: kitchenSiteId,
       order_number: `K-CF-${invoiceId.slice(0, 8)}`, total_minor: 50_000, status: 'NEW', version: 1,
       lines: [{ line_id: randomUUID(), item_id: kitchenTestProductId, item_name: 'Integration Cake', unit: 'piece',
         quantity_scale: 1, quantity_scaled: '1', unit_price_minor: 50_000, line_total_minor: 50_000 }] });
-    const fulfillment = await post(12, 'custom_order.status_changed', { custom_order_id: invoiceId,
+    const fulfillment = await post(13, 'custom_order.status_changed', { custom_order_id: invoiceId,
       site_id: kitchenSiteId, status: 'DELIVERED', version: 2,
       stock_lines: [{ item_id: kitchenTestProductId, quantity_scaled: '1' }],
       recipe_snapshot: [{ product_item_id: kitchenTestProductId, output_scaled: '1', recipe_version: 1,

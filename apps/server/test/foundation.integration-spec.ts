@@ -71,6 +71,8 @@ describe('VPS foundation (PostgreSQL integration)', () => {
     if (managedRoleId) await prisma.role.delete({ where: { id: managedRoleId } });
     if (deviceId) await prisma.device.deleteMany({ where: { id: deviceId } });
     if (itemId) {
+      await prisma.siteRetailPriceRevision.deleteMany({ where: { itemId } });
+      await prisma.siteRetailPrice.deleteMany({ where: { itemId } });
       await prisma.retailPriceRevision.deleteMany({ where: { itemId } });
       await prisma.item.delete({ where: { id: itemId } });
     }
