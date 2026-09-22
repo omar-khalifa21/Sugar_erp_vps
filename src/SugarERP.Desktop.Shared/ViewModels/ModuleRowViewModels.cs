@@ -113,14 +113,37 @@ public sealed class RequestHistoryRowViewModel(
     KitchenRequestSnapshot snapshot,
     string reference,
     string requestedText,
-    string statusText,
     string fulfillmentText)
 {
     public KitchenRequestSnapshot Snapshot { get; } = snapshot;
     public Guid Id => Snapshot.Id;
     public string Reference { get; } = reference;
     public string RequestedText { get; } = requestedText;
-    public string StatusText { get; } = statusText;
+    public string DeliveryIcon { get; } = snapshot.DeliveryState switch
+    {
+        RequestDeliveryState.Draft => "○",
+        RequestDeliveryState.Waiting => "◷",
+        RequestDeliveryState.Sent => "✓",
+        RequestDeliveryState.Received => "✓✓",
+        _ => "!"
+    };
+    public string DeliveryLabel { get; } = snapshot.DeliveryState switch
+    {
+        RequestDeliveryState.Draft => "مسودة · Draft",
+        RequestDeliveryState.Waiting => "قيد الإرسال · Pending",
+        RequestDeliveryState.Sent => "تم الإرسال · Sent",
+        RequestDeliveryState.Received => "وصل للمطبخ · Delivered",
+        _ => "تعذر الإرسال · Failed"
+    };
+    public string DeliveryColor { get; } = snapshot.DeliveryState switch
+    {
+        RequestDeliveryState.Draft => "#98A2B3",
+        RequestDeliveryState.Waiting => "#D97706",
+        RequestDeliveryState.Sent => "#667085",
+        RequestDeliveryState.Received => "#1687C9",
+        _ => "#D92D20"
+    };
+    public string StatusText => $"{DeliveryIcon} {DeliveryLabel}";
     public string FulfillmentText { get; } = fulfillmentText;
     public bool IsDraft => Snapshot.Status == SugarERP.Domain.KitchenRequestStatus.Draft;
 }

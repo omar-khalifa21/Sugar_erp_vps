@@ -7,6 +7,7 @@ using SugarERP.Application;
 using SugarERP.Domain;
 using SugarERP.Infrastructure.Local;
 using SugarERP.Desktop.Shared;
+using SugarERP.Desktop.Shared.ViewModels;
 
 namespace SugarERP.Branch2.App;
 
@@ -32,11 +33,25 @@ public sealed partial class MainWindow : Window
     private T Control<T>(string name) where T : Avalonia.Controls.Control => this.FindControl<T>(name)!;
     private async Task Refresh()
     {
-        var catalog = await new BranchModuleOperationsService(_service.Database).GetCatalogAsync();
+        var modules = new BranchModuleOperationsService(_service.Database);
+        var catalog = await modules.GetCatalogAsync();
         Control<DataGrid>("ItemsGrid").ItemsSource = catalog.Items.Select(x => new CatalogChoice(x)).ToArray();
         Control<DataGrid>("StockGrid").ItemsSource = await _service.StockAsync();
-        Control<ComboBox>("Cafes").ItemsSource = (await new BranchModuleOperationsService(_service.Database).GetCafeProfilesAsync()).Select(x => new CafeChoice(x)).ToArray();
+        Control<ComboBox>("Cafes").ItemsSource = (await modules.GetCafeProfilesAsync()).Select(x => new CafeChoice(x)).ToArray();
         Control<DataGrid>("CafeOrders").ItemsSource = await _service.CafeOrdersAsync();
+        var requests = await modules.GetKitchenRequestsAsync();
+        Control<DataGrid>("WaredRequests").ItemsSource = requests.Select(request =>
+        {
+            var requested = string.Join("، ", request.Lines.Select(line =>
+                $"{line.ItemName} {ArabicDisplay.Quantity(line.RequestedScaled, line.QuantityScale, line.Unit)}"));
+            var approved = request.Lines.Sum(line => line.ApprovedScaled ?? 0);
+            var sent = request.Lines.Sum(line => line.SentScaled);
+            return new RequestHistoryRowViewModel(
+                request,
+                $"طلب {request.RequestedAtUtc.ToLocalTime():yyyy-MM-dd HH:mm}",
+                requested,
+                approved == 0 && sent == 0 ? "لم يعتمد أو يشحن بعد" : $"معتمد {approved} · مشحون {sent}");
+        }).ToArray();
         Control<ComboBox>("Shipments").ItemsSource = (await _service.ShipmentsAsync()).Where(x => x.IsReceivable).Select(x => new ShipmentChoice(x)).ToArray();
         await using var db = _service.Database.CreateContext();
         var history = await db.InventoryTransactions.AsNoTracking().Include(x => x.Lines).ToListAsync();

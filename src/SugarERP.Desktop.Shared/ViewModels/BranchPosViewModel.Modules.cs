@@ -575,7 +575,6 @@ public sealed partial class BranchPosViewModel
                 request,
                 $"طلب {request.RequestedAtUtc.ToLocalTime():yyyy-MM-dd HH:mm}",
                 requested,
-                RequestDeliveryArabic(request.DeliveryState, request.Status),
                 approved == 0 && sent == 0 ? "لم يعتمد أو يشحن بعد" : $"معتمد {approved} · مشحون {sent}"));
         }
         SelectedRequest = selectedId is null
@@ -1339,27 +1338,6 @@ public sealed partial class BranchPosViewModel
     {
         foreach (var row in rows) row.QuantityText = "0";
     }
-
-    private static string RequestStatusArabic(KitchenRequestStatus status) => status switch
-    {
-        KitchenRequestStatus.Draft => "مسودة",
-        KitchenRequestStatus.Submitted => "مرسل للمطبخ",
-        KitchenRequestStatus.Received => "استلمه المطبخ",
-        KitchenRequestStatus.Approved => "معتمد",
-        KitchenRequestStatus.Rejected => "مرفوض",
-        KitchenRequestStatus.Partial => "شحن جزئي",
-        KitchenRequestStatus.Fulfilled => "مكتمل الشحن",
-        _ => "مغلق"
-    };
-
-    private static string RequestDeliveryArabic(RequestDeliveryState deliveryState, KitchenRequestStatus status) => deliveryState switch
-    {
-        RequestDeliveryState.Draft => "لم يُرسل بعد",
-        RequestDeliveryState.Waiting => "◷ في انتظار الإرسال",
-        RequestDeliveryState.Sent => "✓ تم الإرسال",
-        RequestDeliveryState.Failed => "⚠ تعذر الإرسال — محفوظ محلياً",
-        _ => $"✓✓ {RequestStatusArabic(status)}"
-    };
 
     private static string ShipmentStatusArabic(ShipmentStatus status) => status switch
     {
