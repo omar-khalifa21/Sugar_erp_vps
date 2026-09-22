@@ -73,4 +73,30 @@ describe('SyncService routing', () => {
       }),
     );
   });
+
+  it('returns the exact hash-critical timestamp originally uploaded by the device', async () => {
+    const exactOccurredAt = '2026-09-22T12:32:03.3157266+00:00';
+    authenticate.mockResolvedValue({ id: deviceId, siteId, profile: DeviceProfile.BRANCH_TYPE_1 });
+    findMany.mockResolvedValueOnce([{
+      id: 'e68d9482-c0f0-4f92-aecd-27d98089605b',
+      deviceId: 'c54a19ca-326c-4589-b14b-972e150bf9bc',
+      siteId: '9e4f6ddb-dc06-4963-988b-36a035a0f0fb',
+      streamEpoch: 1,
+      deviceSequence: 1,
+      eventType: 'kitchen_request.received',
+      schemaVersion: 1,
+      occurredAt: new Date('2026-09-22T12:32:03.315Z'),
+      occurredAtRaw: exactOccurredAt,
+      receivedAt: new Date('2026-09-22T12:32:04.000Z'),
+      payload: { request_id: '907cc0cd-6ef5-4f6c-b2b3-dd3c4e772857', destination_site_id: siteId },
+      dependencies: [],
+      contentHash: 'a'.repeat(64),
+      serverPosition: 75n,
+    }]);
+
+    const result = await service.pull(deviceId, 'test-secret', undefined, 100);
+
+    expect(result.events).toHaveLength(1);
+    expect(result.events[0].occurred_at).toBe(exactOccurredAt);
+  });
 });

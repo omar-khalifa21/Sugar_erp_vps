@@ -278,6 +278,7 @@ model SyncEvent {
   eventType       String   @map("event_type") @db.VarChar(120)
   schemaVersion   Int      @map("schema_version")
   occurredAt      DateTime @map("occurred_at") @db.Timestamptz(6)
+  occurredAtRaw   String   @map("occurred_at_raw") @db.VarChar(64)
   receivedAt      DateTime @default(now()) @map("received_at") @db.Timestamptz(6)
   payload         Json
   dependencies    Json     @default("[]")

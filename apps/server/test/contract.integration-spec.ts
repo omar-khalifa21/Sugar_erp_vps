@@ -273,9 +273,9 @@ describe('Contract v1 sync (PostgreSQL integration)', () => {
 
     const receivedByKitchen = {
       id: randomUUID(), device_sequence: 1, event_type: 'kitchen_request.received', schema_version: 1,
-      occurred_at: '2026-09-09T19:01:00.000Z', dependencies: [submitted.id],
+      occurred_at: '2026-09-09T19:01:00.1234567+00:00', dependencies: [submitted.id],
       payload: { request_id: requestId, destination_site_id: siteId, status: 'RECEIVED', version: 2,
-        received_at: '2026-09-09T19:01:00.000Z' },
+        received_at: '2026-09-09T19:01:00.1234567+00:00' },
     };
     const kitchenHeaders = { 'x-device-id': kitchenDevice.body.device.id, 'x-device-secret': kitchenDevice.body.credential };
     await request(app.getHttpServer()).post('/api/v1/sync/push').set(kitchenHeaders)
@@ -306,9 +306,12 @@ describe('Contract v1 sync (PostgreSQL integration)', () => {
     expect(await prisma.kitchenRequest.findUnique({ where: { id: requestId } })).toMatchObject({ status: 'FULFILLED' });
     const branchPull = await request(app.getHttpServer()).get('/api/v1/sync/pull?limit=100')
       .set({ 'x-device-id': deviceId, 'x-device-secret': deviceSecret }).expect(200);
-    const branchPullBody = branchPull.body as { events: { id: string }[] };
+    const branchPullBody = branchPull.body as { events: { id: string; occurred_at: string; content_hash: string }[] };
     expect(branchPullBody.events.some((entry) => entry.id === receivedByKitchen.id)).toBe(true);
     expect(branchPullBody.events.some((entry) => entry.id === dispatched.id)).toBe(true);
+    const pulledAcknowledgement = branchPullBody.events.find((entry) => entry.id === receivedByKitchen.id);
+    expect(pulledAcknowledgement?.occurred_at).toBe(receivedByKitchen.occurred_at);
+    expect(pulledAcknowledgement?.content_hash).toBe(computeEventHash(receivedByKitchen));
 
     const received = {
       id: randomUUID(), device_sequence: 4, event_type: 'incoming_receipt.accepted', schema_version: 1,

@@ -93,7 +93,10 @@ public sealed class KitchenRequestSyncFlowTests
                     retailPriceMinor = 10_000, active = true, version = 1 } },
                 customers = Array.Empty<object>(), recipes = Array.Empty<object>(), stock = Array.Empty<object>(), as_of = DateTimeOffset.UtcNow
             };
-            var receivedAt = "2026-09-21T10:01:00.0000000Z";
+            // Preserve all seven fractional digits and the explicit offset: this
+            // is the exact shape emitted by the Kitchen desktop and hashed by the
+            // Branch client before the VPS stores and returns the event.
+            var receivedAt = "2026-09-22T12:32:03.3157266+00:00";
             var receivedPayload = Element(new { request_id = requestId, destination_site_id = branchSiteId, status = "RECEIVED", version = 2, received_at = receivedAt });
             var receivedEventId = Guid.NewGuid();
             var receivedHash = ContractEventFactory.ComputeHash(receivedEventId, 1, "kitchen_request.received", 1, receivedAt, receivedPayload, [requestEventId]);

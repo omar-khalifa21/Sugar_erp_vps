@@ -130,6 +130,7 @@ export class ItemsService {
           eventType,
           schemaVersion: 1,
           occurredAt,
+          occurredAtRaw: event.occurred_at,
           payload,
           dependencies: [],
           contentHash: computeEventHash(event),
