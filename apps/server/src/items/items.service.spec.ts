@@ -10,7 +10,14 @@ describe('ItemsService', () => {
     const transaction = {
       item: { create },
       retailPriceRevision: { create: revision },
-      site: { findMany: jest.fn().mockResolvedValue([{ id: '00000000-0000-0000-0000-000000000020', type: SiteType.BRANCH_TYPE_1 }]) },
+      site: { findMany: jest.fn()
+        .mockResolvedValueOnce([{ id: '00000000-0000-0000-0000-000000000020' }])
+        .mockResolvedValueOnce([{ id: '00000000-0000-0000-0000-000000000020', type: SiteType.BRANCH_TYPE_1 }]) },
+      siteRetailPrice: {
+        createMany: jest.fn().mockResolvedValue({ count: 1 }),
+        findUnique: jest.fn().mockResolvedValue({ priceMinor: 2500, version: 1 }),
+      },
+      siteRetailPriceRevision: { createMany: jest.fn().mockResolvedValue({ count: 1 }) },
       device: { findFirst: jest.fn().mockResolvedValue({ id: systemDeviceId, profile: DeviceProfile.BRANCH_TYPE_1 }) },
       deviceSyncState: {
         findUniqueOrThrow: jest.fn().mockResolvedValue({ deviceId: systemDeviceId, nextExpectedSequence: 4 }),
@@ -46,7 +53,8 @@ describe('ItemsService', () => {
         deviceId: systemDeviceId,
         deviceSequence: 4,
         eventType: 'catalog.item_published',
-        payload: expect.objectContaining({ name_ar: 'كيكة شوكولاتة', retail_price_minor: 2500 }),
+        payload: expect.objectContaining({ name_ar: 'كيكة شوكولاتة', retail_price_minor: 2500,
+          price_site_id: '00000000-0000-0000-0000-000000000020' }),
         contentHash: expect.stringMatching(/^[a-f0-9]{64}$/),
       }),
     });

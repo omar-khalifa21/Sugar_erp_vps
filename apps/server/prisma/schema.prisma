@@ -96,7 +96,10 @@ model Site {
   receivedShipments KitchenShipment[] @relation("ShipmentBranch")
   originatedCafeCustomers CafeCustomer[] @relation("CafeCustomerOrigin")
   inventoryTransactions InventoryTransaction[]
+  ingredientTransactions IngredientStockTransaction[]
   shiftReports ShiftReport[]
+  retailPrices SiteRetailPrice[]
+  retailPriceRevisions SiteRetailPriceRevision[]
 
   @@map("sites")
 }
@@ -189,10 +192,13 @@ model Item {
   recipe Recipe? @relation("RecipeProduct")
   recipeComponents RecipeComponent[] @relation("RecipeIngredient")
   retailPriceRevisions RetailPriceRevision[]
+  siteRetailPrices SiteRetailPrice[]
+  siteRetailPriceRevisions SiteRetailPriceRevision[]
   cafePrices CafeItemPrice[]
   cafePriceRevisions CafePriceRevision[]
   cafeInvoiceLines CafeInvoiceLine[]
   inventoryTransactionLines InventoryTransactionLine[]
+  ingredientTransactions IngredientStockTransaction[]
 
   @@map("items")
 }
@@ -291,6 +297,37 @@ model SyncEvent {
   @@index([siteId, serverPosition])
   @@index([eventType, occurredAt])
   @@map("sync_events")
+}
+
+model SiteRetailPrice {
+  id          String   @id @default(uuid()) @db.Uuid
+  siteId      String   @map("site_id") @db.Uuid
+  itemId      String   @map("item_id") @db.Uuid
+  priceMinor  Int      @map("price_minor")
+  version     Int      @default(1)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  site        Site     @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  item        Item     @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  @@unique([siteId, itemId])
+  @@index([itemId])
+  @@map("site_retail_prices")
+}
+
+model SiteRetailPriceRevision {
+  id          String   @id @default(uuid()) @db.Uuid
+  siteId      String   @map("site_id") @db.Uuid
+  itemId      String   @map("item_id") @db.Uuid
+  priceMinor  Int      @map("price_minor")
+  version     Int
+  effectiveAt DateTime @default(now()) @map("effective_at") @db.Timestamptz(6)
+  site        Site     @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  item        Item     @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  @@unique([siteId, itemId, version])
+  @@index([siteId, effectiveAt])
+  @@index([itemId, effectiveAt])
+  @@map("site_retail_price_revisions")
 }
 
 model ShiftReport {
@@ -417,6 +454,7 @@ model StockBalance {
   itemId         String        @map("item_id") @db.Uuid
   location       StockLocation
   quantityScaled BigInt        @map("quantity_scaled")
+  inventoryCostMinor BigInt     @default(0) @map("inventory_cost_minor")
   asOfAt         DateTime      @map("as_of_at") @db.Timestamptz(6)
   version        Int           @default(1)
   sourceEventId  String?       @map("source_event_id") @db.Uuid
@@ -426,6 +464,24 @@ model StockBalance {
   @@unique([siteId, itemId, location])
   @@index([siteId, asOfAt])
   @@map("stock_balances")
+}
+
+model IngredientStockTransaction {
+  id String @id @db.Uuid
+  siteId String @map("site_id") @db.Uuid
+  itemId String @map("item_id") @db.Uuid
+  sourceEventId String @map("source_event_id") @db.Uuid
+  kind String @db.VarChar(40)
+  quantityDeltaScaled BigInt @map("quantity_delta_scaled")
+  costMinor BigInt @default(0) @map("cost_minor")
+  reason String @default("") @db.VarChar(500)
+  occurredAt DateTime @map("occurred_at") @db.Timestamptz(6)
+  site Site @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  item Item @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  @@unique([sourceEventId, itemId, kind])
+  @@index([siteId, itemId, occurredAt])
+  @@map("ingredient_stock_transactions")
 }
 
 model InventoryTransaction {
@@ -520,6 +576,7 @@ model CafeCustomer {
   contact   String?       @db.VarChar(200)
   notes     String?       @db.VarChar(500)
   active    Boolean       @default(true)
+  version   Int           @default(1)
   createdAt DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
   originSiteId String?    @map("origin_site_id") @db.Uuid
@@ -577,6 +634,9 @@ model CafeInvoice {
   status        CafeInvoiceStatus @default(OPEN)
   occurredAt    DateTime          @map("occurred_at") @db.Timestamptz(6)
   sourceEventId String?           @unique @map("source_event_id") @db.Uuid
+  fulfilledAt DateTime?            @map("fulfilled_at") @db.Timestamptz(6)
+  fulfillmentEventId String?       @unique @map("fulfillment_event_id") @db.Uuid
+  fulfillmentCostMinor BigInt?     @map("fulfillment_cost_minor")
   createdAt     DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
   customer      CafeCustomer      @relation(fields: [customerId], references: [id], onDelete: Restrict)
   issuingSite   Site              @relation("CafeInvoiceSite", fields: [issuingSiteId], references: [id], onDelete: Restrict)

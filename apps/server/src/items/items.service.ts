@@ -10,8 +10,16 @@ import { computeEventHash } from '../sync/sync.service';
 export class ItemsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  list(): Promise<Item[]> {
-    return this.prisma.item.findMany({ orderBy: [{ nameAr: 'asc' }, { createdAt: 'asc' }] });
+  list() {
+    return this.prisma.item.findMany({
+      include: {
+        siteRetailPrices: {
+          include: { site: { select: { id: true, name: true, type: true } } },
+          orderBy: { site: { name: 'asc' } },
+        },
+      },
+      orderBy: [{ nameAr: 'asc' }, { createdAt: 'asc' }],
+    });
   }
 
   create(input: CreateItemDto): Promise<Item> {
@@ -31,6 +39,18 @@ export class ItemsService {
       await transaction.retailPriceRevision.create({
         data: { itemId: item.id, priceMinor: item.retailPriceMinor, version: item.version },
       });
+      const branches = await transaction.site.findMany({
+        where: { active: true, type: { in: ['BRANCH_TYPE_1', 'BRANCH_TYPE_2'] } },
+        select: { id: true },
+      });
+      if (branches.length) {
+        await transaction.siteRetailPrice.createMany({
+          data: branches.map((site) => ({ siteId: site.id, itemId: item.id, priceMinor: item.retailPriceMinor, version: 1 })),
+        });
+        await transaction.siteRetailPriceRevision.createMany({
+          data: branches.map((site) => ({ siteId: site.id, itemId: item.id, priceMinor: item.retailPriceMinor, version: 1 })),
+        });
+      }
       await this.publishCatalogItem(transaction, item, 'catalog.item_published');
       return item;
     });
@@ -80,6 +100,9 @@ export class ItemsService {
   ): Promise<void> {
     const sites = await transaction.site.findMany({ where: { active: true }, select: { id: true, type: true } });
     for (const site of sites) {
+      const sitePrice = site.type === 'KITCHEN'
+        ? null
+        : await transaction.siteRetailPrice.findUnique({ where: { siteId_itemId: { siteId: site.id, itemId: item.id } } });
       let device = await transaction.device.findFirst({ where: { siteId: site.id, name: '__SERVER_SYNC__' } });
       if (!device) {
         device = await transaction.device.create({
@@ -106,7 +129,9 @@ export class ItemsService {
         name_ar: item.nameAr,
         unit: item.unit,
         quantity_scale: item.quantityScale,
-        retail_price_minor: item.retailPriceMinor,
+        retail_price_minor: sitePrice?.priceMinor ?? item.retailPriceMinor,
+        price_site_id: site.id,
+        price_version: sitePrice?.version ?? 0,
         kind: item.kind,
         active: item.active,
         version: item.version,

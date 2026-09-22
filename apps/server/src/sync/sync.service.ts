@@ -24,12 +24,20 @@ export class SyncService {
     const device = await this.deviceAuth.authenticate(deviceId, credential, appVersion);
     const [site, catalog, customers, recipes, stock] = await Promise.all([
       this.prisma.site.findUniqueOrThrow({ where: { id: device.siteId }, select: { id: true, name: true, type: true, timezone: true } }),
-      this.prisma.item.findMany({ where: { active: true }, orderBy: { nameAr: 'asc' } }),
+      this.prisma.item.findMany({
+        where: { active: true },
+        include: { siteRetailPrices: { where: { siteId: device.siteId }, take: 1 } },
+        orderBy: { nameAr: 'asc' },
+      }),
       this.prisma.cafeCustomer.findMany({ where: { active: true }, include: { prices: true }, orderBy: { name: 'asc' } }),
       device.profile === 'KITCHEN' ? this.prisma.recipe.findMany({ where: { active: true }, include: { components: true }, orderBy: { productItemId: 'asc' } }) : Promise.resolve([]),
       this.prisma.stockBalance.findMany({ where: { siteId: device.siteId }, select: { itemId: true, location: true, quantityScaled: true, version: true, asOfAt: true } }),
     ]);
-    return { contract_version: '1.0', site, catalog, customers, recipes: recipes.map((recipe) => ({ id: recipe.id, product_item_id: recipe.productItemId,
+    return { contract_version: '1.0', site, catalog: catalog.map(({ siteRetailPrices, ...item }) => ({
+      ...item,
+      retailPriceMinor: siteRetailPrices[0]?.priceMinor ?? item.retailPriceMinor,
+      priceVersion: siteRetailPrices[0]?.version ?? 0,
+    })), customers, recipes: recipes.map((recipe) => ({ id: recipe.id, product_item_id: recipe.productItemId,
       output_scaled: recipe.outputScaled.toString(), version: recipe.version, components: recipe.components.map((component) => ({
         ingredient_item_id: component.ingredientItemId, quantity_scaled: component.quantityScaled.toString(),
       })) })), stock: stock.map((row) => ({ ...row, quantityScaled: row.quantityScaled.toString() })), as_of: new Date().toISOString() };
@@ -161,6 +169,12 @@ export class SyncService {
     // events back can only duplicate work and can block older clients before they
     // reach changes published by another device or by the server.
     const routes: Prisma.SyncEventWhereInput[] = [{ siteId: device.siteId, deviceId: { not: device.id } }];
+    // The catalog identity is global. Price remains site-scoped in the payload,
+    // and desktop clients preserve their own price when the event belongs to a
+    // different site.
+    routes.push({ eventType: { in: ['catalog.item_published', 'catalog.item.updated', 'catalog.item.deleted'] } });
+    if (device.profile !== DeviceProfile.BRANCH_TYPE_1)
+      routes.push({ eventType: { in: ['cafe_customer.created', 'cafe_customer.updated', 'cafe_customer.archived', 'cafe_customer.price_list_updated'] } });
     if (device.profile === DeviceProfile.KITCHEN) {
       // Requests are owned by branch writers, but must reach the kitchen feed.
       routes.push({

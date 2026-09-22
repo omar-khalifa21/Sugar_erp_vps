@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Diagnostics;
 using Microsoft.EntityFrameworkCore;
 using SugarERP.Application;
 using SugarERP.Domain;
@@ -52,6 +53,7 @@ public sealed class BranchSyncService(HttpClient httpClient, LocalDatabase datab
 
     private async Task<SyncRunResult> SynchronizeCoreAsync(CancellationToken cancellationToken)
     {
+        Trace.WriteLine("[SYNC] Branch sync started; pushing durable outbox.");
         var pushed = await PushPendingAsync(cancellationToken);
         DeviceConfiguration? configuration;
         string? cursor;
@@ -74,6 +76,7 @@ public sealed class BranchSyncService(HttpClient httpClient, LocalDatabase datab
             var client = new CentralApiClient(httpClient);
             var bootstrap = await client.GetBootstrapAsync(connection, cancellationToken);
             var received = await IncomingSyncApplier.ApplyCatalogSnapshotAsync(database, configuration, bootstrap, cancellationToken);
+            Trace.WriteLine($"[SYNC] Branch bootstrap applied; catalog changes={received}.");
             var pageCount = 0;
             bool hasMore;
             do
@@ -98,10 +101,12 @@ public sealed class BranchSyncService(HttpClient httpClient, LocalDatabase datab
                     : !reportUploads.Succeeded
                         ? $"اكتملت مزامنة الحركات، لكن بقي تقرير وردية للرفع: {reportUploads.Message}"
                     : $"نزل {received} تحديث. ما زالت بعض الحركات المحلية بانتظار الرفع: {pushed.UserMessage}";
+            Trace.WriteLine($"[SYNC] Branch sync completed; pushed={pushed.Acknowledged}, pulled={received}, remaining={remaining}.");
             return new SyncRunResult(pushed.Sent, pushed.Acknowledged, remaining, message, pushed.Succeeded && reportUploads.Succeeded && !hasMore, received);
         }
         catch (CentralApiException exception)
         {
+            Trace.WriteLine($"[SYNC ERROR] code={exception.Code}; retryable={exception.Retryable}; endpoint=sync; response={exception.SafeMessage}");
             return pushed with
             {
                 UserMessage = exception.Code switch

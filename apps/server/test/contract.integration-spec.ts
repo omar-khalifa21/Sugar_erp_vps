@@ -21,6 +21,8 @@ describe('Contract v1 sync (PostgreSQL integration)', () => {
   let kitchenDeviceSecret: string;
   let transferItemId: string;
   let ingredientItemId: string;
+  let kitchenTestProductId: string;
+  let kitchenTestIngredientId: string;
   let adminUserId: string;
   const username = `sync-admin-${randomUUID().slice(0, 8)}`;
   const siteCode = `SYNC-${randomUUID().slice(0, 8)}`.toUpperCase();
@@ -54,6 +56,11 @@ describe('Contract v1 sync (PostgreSQL integration)', () => {
   }, 120_000);
 
   afterAll(async () => {
+    const integrationSiteIds = [siteId, kitchenSiteId].filter((value): value is string => Boolean(value));
+    if (integrationSiteIds.length) {
+      await prisma.siteRetailPriceRevision.deleteMany({ where: { siteId: { in: integrationSiteIds } } });
+      await prisma.siteRetailPrice.deleteMany({ where: { siteId: { in: integrationSiteIds } } });
+    }
     if (siteId) {
       await prisma.saleCorrection.deleteMany({ where: { originalSale: { siteId } } });
       await prisma.retailSale.deleteMany({ where: { siteId } });
@@ -69,10 +76,16 @@ describe('Contract v1 sync (PostgreSQL integration)', () => {
       await prisma.cafeCustomer.deleteMany({ where: { originSiteId: siteId } });
       await prisma.inventoryTransactionLine.deleteMany({ where: { transaction: { siteId } } });
       await prisma.inventoryTransaction.deleteMany({ where: { siteId } });
+      await prisma.ingredientStockTransaction.deleteMany({ where: { siteId } });
       await prisma.stockBalance.deleteMany({ where: { siteId } });
     }
     if (kitchenSiteId) {
+      await prisma.cafeInvoiceLine.deleteMany({ where: { invoice: { issuingSiteId: kitchenSiteId } } });
+      await prisma.cafeInvoice.deleteMany({ where: { issuingSiteId: kitchenSiteId } });
+      await prisma.cafeItemPrice.deleteMany({ where: { customer: { originSiteId: kitchenSiteId } } });
+      await prisma.cafeCustomer.deleteMany({ where: { originSiteId: kitchenSiteId } });
       await prisma.ingredientVariance.deleteMany({ where: { siteId: kitchenSiteId } });
+      await prisma.ingredientStockTransaction.deleteMany({ where: { siteId: kitchenSiteId } });
       await prisma.stockBalance.deleteMany({ where: { siteId: kitchenSiteId } });
       await prisma.syncEvent.deleteMany({ where: { siteId: kitchenSiteId } });
       await prisma.enrollmentToken.deleteMany({ where: { siteId: kitchenSiteId } });
@@ -90,8 +103,21 @@ describe('Contract v1 sync (PostgreSQL integration)', () => {
       await prisma.userSiteRole.deleteMany({ where: { userId: user.id } });
       await prisma.user.delete({ where: { id: user.id } });
     }
+    const integrationItemIds = [transferItemId, ingredientItemId, kitchenTestProductId, kitchenTestIngredientId]
+      .filter((value): value is string => Boolean(value));
+    if (integrationItemIds.length) {
+      await prisma.siteRetailPriceRevision.deleteMany({ where: { itemId: { in: integrationItemIds } } });
+      await prisma.siteRetailPrice.deleteMany({ where: { itemId: { in: integrationItemIds } } });
+      await prisma.retailPriceRevision.deleteMany({ where: { itemId: { in: integrationItemIds } } });
+    }
     if (transferItemId) { await prisma.recipeComponent.deleteMany({ where: { recipe: { productItemId: transferItemId } } }); await prisma.recipe.deleteMany({ where: { productItemId: transferItemId } }); await prisma.item.delete({ where: { id: transferItemId } }); }
     if (ingredientItemId) await prisma.item.delete({ where: { id: ingredientItemId } });
+    if (kitchenTestProductId) {
+      await prisma.recipeComponent.deleteMany({ where: { recipe: { productItemId: kitchenTestProductId } } });
+      await prisma.recipe.deleteMany({ where: { productItemId: kitchenTestProductId } });
+    }
+    if (kitchenTestProductId) await prisma.item.delete({ where: { id: kitchenTestProductId } });
+    if (kitchenTestIngredientId) await prisma.item.delete({ where: { id: kitchenTestIngredientId } });
     await app.close();
   });
 
@@ -470,6 +496,47 @@ describe('Contract v1 sync (PostgreSQL integration)', () => {
     await prisma.cafeInvoice.deleteMany({ where: { customerId: cafeId } });
     await prisma.cafeCustomer.delete({ where: { id: cafeId } });
 
+    const sharedItemId = randomUUID();
+    const branchTwoCatalogUpload = await postBusiness('catalog.item.updated', {
+      item_id: sharedItemId, site_id: branch.id, sku: `SHARED-${sharedItemId.slice(0, 8)}`,
+      name_ar: 'Shared catalog product', unit: 'pcs', quantity_scale: 1,
+      retail_price_minor: 12_500, kind: 'PRODUCT', active: true, version: 1,
+    });
+    const branchOneCatalogEvent = {
+      id: randomUUID(), device_sequence: 6, event_type: 'catalog.item.updated', schema_version: 1,
+      occurred_at: new Date().toISOString(), dependencies: [] as string[], payload: {
+        item_id: sharedItemId, site_id: siteId, sku: `SHARED-${sharedItemId.slice(0, 8)}`,
+        name_ar: 'Shared catalog product', unit: 'pcs', quantity_scale: 1,
+        retail_price_minor: 10_000, kind: 'PRODUCT', active: true, version: 2,
+      },
+    };
+    await request(app.getHttpServer()).post('/api/v1/sync/push')
+      .set({ 'x-device-id': deviceId, 'x-device-secret': deviceSecret })
+      .send({ contract_version: '1.0', stream_epoch: 1,
+        events: [{ ...branchOneCatalogEvent, content_hash: computeEventHash(branchOneCatalogEvent) }] }).expect(200);
+
+    const prices = await prisma.siteRetailPrice.findMany({ where: { itemId: sharedItemId }, orderBy: { priceMinor: 'asc' } });
+    expect(prices).toEqual([
+      expect.objectContaining({ siteId, priceMinor: 10_000 }),
+      expect.objectContaining({ siteId: branch.id, priceMinor: 12_500 }),
+    ]);
+    const branchOneBootstrap = await request(app.getHttpServer()).get('/api/v1/sync/bootstrap')
+      .set({ 'x-device-id': deviceId, 'x-device-secret': deviceSecret }).expect(200);
+    const branchTwoBootstrap = await request(app.getHttpServer()).get('/api/v1/sync/bootstrap').set(headers).expect(200);
+    const branchOneCatalog = (branchOneBootstrap.body as { catalog: { id: string; retailPriceMinor: number }[] }).catalog;
+    const branchTwoCatalog = (branchTwoBootstrap.body as { catalog: { id: string; retailPriceMinor: number }[] }).catalog;
+    expect(branchOneCatalog.find((row) => row.id === sharedItemId)?.retailPriceMinor).toBe(10_000);
+    expect(branchTwoCatalog.find((row) => row.id === sharedItemId)?.retailPriceMinor).toBe(12_500);
+    const kitchenPull = await request(app.getHttpServer()).get('/api/v1/sync/pull?limit=100')
+      .set({ 'x-device-id': kitchenDeviceId, 'x-device-secret': kitchenDeviceSecret }).expect(200);
+    const kitchenEvents = (kitchenPull.body as { events: { id: string }[] }).events;
+    expect(kitchenEvents.some((row) => row.id === branchTwoCatalogUpload.events[0].id)).toBe(true);
+
+    await prisma.siteRetailPriceRevision.deleteMany({ where: { itemId: sharedItemId } });
+    await prisma.siteRetailPrice.deleteMany({ where: { itemId: sharedItemId } });
+    await prisma.retailPriceRevision.deleteMany({ where: { itemId: sharedItemId } });
+    await prisma.item.delete({ where: { id: sharedItemId } });
+
     await prisma.kitchenIncomingReceiptLine.deleteMany({ where: { receipt: { shipmentId } } });
     await prisma.kitchenIncomingReceipt.deleteMany({ where: { shipmentId } });
     await prisma.kitchenShipmentLine.deleteMany({ where: { shipmentId } });
@@ -477,6 +544,8 @@ describe('Contract v1 sync (PostgreSQL integration)', () => {
     await prisma.kitchenRequestLine.deleteMany({ where: { requestId } });
     await prisma.kitchenRequest.delete({ where: { id: requestId } });
     await prisma.syncEvent.deleteMany({ where: { siteId: branch.id } });
+    await prisma.siteRetailPriceRevision.deleteMany({ where: { siteId: branch.id } });
+    await prisma.siteRetailPrice.deleteMany({ where: { siteId: branch.id } });
     await prisma.enrollmentToken.deleteMany({ where: { siteId: branch.id } });
     await prisma.device.deleteMany({ where: { siteId: branch.id } });
     await prisma.site.delete({ where: { id: branch.id } });
@@ -502,5 +571,62 @@ describe('Contract v1 sync (PostgreSQL integration)', () => {
       lines: [{ line_id: countLineId, item_id: ingredientItemId, actual_scaled: '78', recorded_waste_scaled: '4' }] });
     expect((await prisma.stockBalance.findFirstOrThrow({ where: { siteId: kitchenSiteId, itemId: ingredientItemId, location: 'KITCHEN' } })).quantityScaled).toBe(78n);
     expect(await prisma.ingredientVariance.findUnique({ where: { id: countLineId } })).toMatchObject({ expectedScaled: 80n, actualScaled: 78n, recordedWasteScaled: 4n, unexplainedVarianceScaled: 2n });
+  });
+
+  it('syncs kitchen catalog, recipe, cafe, purchase cost and one cafe fulfillment', async () => {
+    const headers = { 'x-device-id': kitchenDeviceId, 'x-device-secret': kitchenDeviceSecret };
+    const post = async (sequence: number, eventType: string, payload: Record<string, unknown>) => {
+      const event = { id: randomUUID(), device_sequence: sequence, event_type: eventType, schema_version: 1,
+        occurred_at: new Date().toISOString(), dependencies: [] as string[], payload };
+      const upload = { contract_version: '1.0', stream_epoch: 1, events: [{ ...event, content_hash: computeEventHash(event) }] };
+      const response = await request(app.getHttpServer()).post('/api/v1/sync/push').set(headers).send(upload).expect(200);
+      expect((response.body as { results: { status: string }[] }).results[0].status).toBe('accepted');
+      return upload;
+    };
+    kitchenTestProductId = randomUUID(); kitchenTestIngredientId = randomUUID();
+    await post(6, 'catalog.item.updated', { item_id: kitchenTestIngredientId, site_id: kitchenSiteId,
+      sku: `AUTO-${kitchenTestIngredientId}`, name_ar: 'Integration Flour', unit: 'g', quantity_scale: 1,
+      retail_price_minor: 0, kind: 'INGREDIENT', active: true, version: 1 });
+    await post(7, 'catalog.item.updated', { item_id: kitchenTestProductId, site_id: kitchenSiteId,
+      sku: `AUTO-${kitchenTestProductId}`, name_ar: 'Integration Cake', unit: 'piece', quantity_scale: 1,
+      retail_price_minor: 50_000, kind: 'PRODUCT', active: true, version: 1 });
+    await post(8, 'recipe.updated', { product_item_id: kitchenTestProductId, output_scaled: '1', version: 1,
+      components: [{ ingredient_item_id: kitchenTestIngredientId, quantity_scaled: '500' }] });
+    await post(9, 'ingredient.received', { operation_id: randomUUID(), reason: 'Supplier purchase',
+      lines: [{ line_id: randomUUID(), item_id: kitchenTestIngredientId, quantity_scaled: '1000', total_cost_minor: '50000' }] });
+    const cafeId = randomUUID();
+    await post(10, 'cafe_customer.created', { customer_id: cafeId, site_id: kitchenSiteId,
+      name: 'Integration Cafe', phone: '01000000000', kind: 'Cafe', version: 1,
+      prices: [{ item_id: kitchenTestProductId, unit_price_minor: 50_000 }] });
+    const invoiceId = randomUUID();
+    await post(11, 'custom_order.created', { custom_order_id: invoiceId, customer_id: cafeId, site_id: kitchenSiteId,
+      order_number: `K-CF-${invoiceId.slice(0, 8)}`, total_minor: 50_000, status: 'NEW', version: 1,
+      lines: [{ line_id: randomUUID(), item_id: kitchenTestProductId, item_name: 'Integration Cake', unit: 'piece',
+        quantity_scale: 1, quantity_scaled: '1', unit_price_minor: 50_000, line_total_minor: 50_000 }] });
+    const fulfillment = await post(12, 'custom_order.status_changed', { custom_order_id: invoiceId,
+      site_id: kitchenSiteId, status: 'DELIVERED', version: 2,
+      stock_lines: [{ item_id: kitchenTestProductId, quantity_scaled: '1' }],
+      recipe_snapshot: [{ product_item_id: kitchenTestProductId, output_scaled: '1', recipe_version: 1,
+        components: [{ ingredient_item_id: kitchenTestIngredientId, quantity_scaled: '500' }] }],
+      ingredient_lines: [{ line_id: randomUUID(), ingredient_item_id: kitchenTestIngredientId,
+        quantity_scaled: '500', cost_minor: '25000' }], production_cost_minor: '25000' });
+    const replay = await request(app.getHttpServer()).post('/api/v1/sync/push').set(headers).send(fulfillment).expect(200);
+    expect((replay.body as { results: { status: string }[] }).results[0].status).toBe('duplicate');
+    const balance = await prisma.stockBalance.findFirstOrThrow({ where: { siteId: kitchenSiteId,
+      itemId: kitchenTestIngredientId, location: 'KITCHEN' } });
+    expect(balance.quantityScaled).toBe(500n);
+    expect(balance.inventoryCostMinor).toBe(25_000n);
+    expect(await prisma.ingredientStockTransaction.count({ where: { siteId: kitchenSiteId,
+      itemId: kitchenTestIngredientId, kind: 'CAFE_PRODUCTION' } })).toBe(1);
+    expect((await prisma.cafeInvoice.findUniqueOrThrow({ where: { id: invoiceId } })).fulfillmentCostMinor).toBe(25_000n);
+    const kitchenBootstrap = await request(app.getHttpServer()).get('/api/v1/sync/bootstrap').set(headers).expect(200);
+    const branchBootstrap = await request(app.getHttpServer()).get('/api/v1/sync/bootstrap')
+      .set({ 'x-device-id': deviceId, 'x-device-secret': deviceSecret }).expect(200);
+    const kitchenBody = kitchenBootstrap.body as { catalog: { id: string }[]; recipes: { product_item_id: string }[]; customers: { id: string }[] };
+    const branchBody = branchBootstrap.body as { catalog: { id: string }[] };
+    expect(kitchenBody.catalog.some((row) => row.id === kitchenTestProductId)).toBe(true);
+    expect(kitchenBody.recipes.some((row) => row.product_item_id === kitchenTestProductId)).toBe(true);
+    expect(kitchenBody.customers.some((row) => row.id === cafeId)).toBe(true);
+    expect(branchBody.catalog.some((row) => row.id === kitchenTestProductId)).toBe(true);
   });
 });

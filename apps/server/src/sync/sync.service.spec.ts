@@ -30,6 +30,8 @@ describe('SyncService routing', () => {
         where: {
           OR: [
             { siteId, deviceId: { not: deviceId } },
+            { eventType: { in: ['catalog.item_published', 'catalog.item.updated', 'catalog.item.deleted'] } },
+            { eventType: { in: ['cafe_customer.created', 'cafe_customer.updated', 'cafe_customer.archived', 'cafe_customer.price_list_updated'] } },
             {
               eventType: 'kitchen_request.submitted',
               site: { type: { in: [SiteType.BRANCH_TYPE_1, SiteType.BRANCH_TYPE_2] } },
@@ -57,6 +59,7 @@ describe('SyncService routing', () => {
         where: {
           OR: [
             { siteId, deviceId: { not: deviceId } },
+            { eventType: { in: ['catalog.item_published', 'catalog.item.updated', 'catalog.item.deleted'] } },
             {
               eventType: 'shipment.dispatched',
               site: { type: SiteType.KITCHEN },

@@ -47,6 +47,13 @@ export interface Item {
   active: boolean;
   version: number;
   updatedAt: string;
+  siteRetailPrices?: Array<{
+    id: string;
+    siteId: string;
+    priceMinor: number;
+    version: number;
+    site: { id: string; name: string; type: Site['type'] };
+  }>;
 }
 
 export interface CafeCustomerInput {

@@ -18,8 +18,20 @@ public sealed class KitchenConfiguration
     public int NextCustomOrderSequence { get; set; } = 1;
 }
 
-public sealed class KitchenProduct { public Guid Id { get; set; } public string Name { get; set; } = ""; public string Unit { get; set; } = ""; public int QuantityScale { get; set; } = 1; public bool Active { get; set; } = true; }
-public sealed class KitchenCafeCustomer { public Guid Id { get; set; } public string Name { get; set; } = ""; public string Contact { get; set; } = ""; public string Notes { get; set; } = ""; public bool Active { get; set; } = true; public bool HiddenLocally { get; set; } public List<KitchenCafePrice> Prices { get; set; } = []; }
+public sealed class KitchenProduct
+{
+    public Guid Id { get; set; }
+    public string Sku { get; set; } = "";
+    public string Name { get; set; } = "";
+    public string Unit { get; set; } = "";
+    public string Kind { get; set; } = "PRODUCT";
+    public int QuantityScale { get; set; } = 1;
+    public bool Active { get; set; } = true;
+    public int Version { get; set; } = 1;
+    public DateTimeOffset UpdatedAtUtc { get; set; }
+    public long BasePriceMinor { get; set; }
+}
+public sealed class KitchenCafeCustomer { public Guid Id { get; set; } public string Name { get; set; } = ""; public string Contact { get; set; } = ""; public string Notes { get; set; } = ""; public bool Active { get; set; } = true; public bool HiddenLocally { get; set; } public int Version { get; set; } = 1; public List<KitchenCafePrice> Prices { get; set; } = []; }
 public sealed class KitchenCafePrice { public Guid CustomerId { get; set; } public Guid ItemId { get; set; } public long UnitPriceMinor { get; set; } public int Version { get; set; } public KitchenCafeCustomer Customer { get; set; } = null!; public KitchenProduct Item { get; set; } = null!; }
 public sealed class KitchenCustomOrder
 {
@@ -94,10 +106,10 @@ public sealed class KitchenReturnRecord
     public string PayloadJson { get; set; } = "";
     public DateTimeOffset DispatchedAtUtc { get; set; }
 }
-public sealed class KitchenIngredientBalance { public Guid ItemId { get; set; } public string Name { get; set; } = ""; public string Unit { get; set; } = ""; public int QuantityScale { get; set; } = 1; public long QuantityScaled { get; set; } public int Version { get; set; } }
+public sealed class KitchenIngredientBalance { public Guid ItemId { get; set; } public string Name { get; set; } = ""; public string Unit { get; set; } = ""; public int QuantityScale { get; set; } = 1; public long QuantityScaled { get; set; } public long InventoryCostMinor { get; set; } public int Version { get; set; } }
 public sealed class KitchenRecipeRecord { public Guid ProductItemId { get; set; } public long OutputScaled { get; set; } public int Version { get; set; } public List<KitchenRecipeComponentRecord> Components { get; set; } = []; }
 public sealed class KitchenRecipeComponentRecord { public Guid Id { get; set; } public Guid ProductItemId { get; set; } public Guid IngredientItemId { get; set; } public long QuantityScaled { get; set; } public KitchenRecipeRecord Recipe { get; set; } = null!; }
-public sealed class KitchenIngredientMovement { public Guid Id { get; set; } public Guid ShipmentId { get; set; } public Guid IngredientItemId { get; set; } public string Kind { get; set; } = "DISPATCH"; public string Reason { get; set; } = ""; public long DeltaScaled { get; set; } public string RecipeSnapshotJson { get; set; } = ""; public DateTimeOffset OccurredAtUtc { get; set; } }
+public sealed class KitchenIngredientMovement { public Guid Id { get; set; } public Guid ShipmentId { get; set; } public Guid IngredientItemId { get; set; } public string Kind { get; set; } = "DISPATCH"; public string Reason { get; set; } = ""; public long DeltaScaled { get; set; } public long CostMinor { get; set; } public string RecipeSnapshotJson { get; set; } = ""; public DateTimeOffset OccurredAtUtc { get; set; } }
 
 public sealed class KitchenDbContext(DbContextOptions<KitchenDbContext> options) : DbContext(options)
 {
@@ -195,6 +207,14 @@ public sealed class KitchenStore
         await AddColumnAsync(db, "ALTER TABLE outbox ADD COLUMN LastErrorMessage TEXT NULL");
         await AddColumnAsync(db, "ALTER TABLE outbox ADD COLUMN PermanentlyFailed INTEGER NOT NULL DEFAULT 0");
         await AddColumnAsync(db, "ALTER TABLE cafe_customers ADD COLUMN HiddenLocally INTEGER NOT NULL DEFAULT 0");
+        await AddColumnAsync(db, "ALTER TABLE products ADD COLUMN Sku TEXT NOT NULL DEFAULT ''");
+        await AddColumnAsync(db, "ALTER TABLE products ADD COLUMN Kind TEXT NOT NULL DEFAULT 'PRODUCT'");
+        await AddColumnAsync(db, "ALTER TABLE products ADD COLUMN Version INTEGER NOT NULL DEFAULT 1");
+        await AddColumnAsync(db, "ALTER TABLE products ADD COLUMN UpdatedAtUtc TEXT NOT NULL DEFAULT '0001-01-01T00:00:00+00:00'");
+        await AddColumnAsync(db, "ALTER TABLE products ADD COLUMN BasePriceMinor INTEGER NOT NULL DEFAULT 0");
+        await AddColumnAsync(db, "ALTER TABLE ingredient_balances ADD COLUMN InventoryCostMinor INTEGER NOT NULL DEFAULT 0");
+        await AddColumnAsync(db, "ALTER TABLE ingredient_movements ADD COLUMN CostMinor INTEGER NOT NULL DEFAULT 0");
+        await AddColumnAsync(db, "ALTER TABLE cafe_customers ADD COLUMN Version INTEGER NOT NULL DEFAULT 1");
         var configuration = await db.Configuration.SingleOrDefaultAsync();
         var highestSequence = await db.Outbox.Select(x => (int?)x.Sequence).MaxAsync() ?? 0;
         if (configuration is not null && configuration.NextDeviceSequence <= highestSequence)

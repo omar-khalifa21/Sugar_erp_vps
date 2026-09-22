@@ -11,7 +11,7 @@ export class ItemsController {
   constructor(private readonly items: ItemsService) {}
 
   @Get()
-  list(): Promise<Item[]> {
+  list(): ReturnType<ItemsService['list']> {
     return this.items.list();
   }
 

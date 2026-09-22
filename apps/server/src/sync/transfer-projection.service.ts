@@ -1,8 +1,9 @@
 import { HttpException, Injectable } from '@nestjs/common';
-import { DeviceProfile, Prisma, StockLocation } from '@prisma/client';
+import { DeviceProfile, ItemKind, Prisma, StockLocation } from '@prisma/client';
 import { SyncEventDto } from './sync.dto';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
+import { randomUUID } from 'node:crypto';
 
 type Client = Prisma.TransactionClient;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -50,6 +51,12 @@ function lines(value: unknown): Record<string, unknown>[] {
   return value.map(object);
 }
 
+function inventoryCostForUse(costMinor: bigint, availableScaled: bigint, usedScaled: bigint): bigint {
+  if (availableScaled <= 0n || costMinor <= 0n) return 0n;
+  if (usedScaled >= availableScaled) return costMinor;
+  return (costMinor * usedScaled * 2n + availableScaled) / (availableScaled * 2n);
+}
+
 @Injectable()
 export class TransferProjectionService {
   private readonly jwt: JwtService;
@@ -67,7 +74,9 @@ export class TransferProjectionService {
       case 'manual_incoming.posted': return this.manualIncoming(tx, event, siteId, profile);
       case 'catalog.item.updated': return this.catalogItem(tx, event, siteId, profile);
       case 'catalog.item.deleted': return this.archiveCatalogItem(tx, event, siteId, profile);
+      case 'recipe.updated': return this.recipe(tx, event, profile);
       case 'cafe_customer.created': return this.cafeCustomer(tx, event, siteId);
+      case 'cafe_customer.updated': return this.updateCafeCustomer(tx, event, siteId, profile);
       case 'cafe_customer.archived': return this.archiveCafeCustomer(tx, event, siteId, profile);
       case 'cafe_customer.price_list_updated': return this.cafePriceList(tx, event, siteId, profile);
       case 'branch2.inventory.posted': return this.inventory(tx, event, siteId, profile);
@@ -76,7 +85,7 @@ export class TransferProjectionService {
       case 'kitchen_return.dispatched': return this.kitchenReturn(tx, event, siteId, profile);
       case 'custom_order.created': return this.cafeOrder(tx, event, siteId);
       case 'custom_customer.payment_recorded': return this.cafePayment(tx, event, siteId);
-      case 'custom_order.status_changed': return this.cafeStatus(tx, event, siteId);
+      case 'custom_order.status_changed': return this.cafeStatus(tx, event, siteId, profile);
       default: return;
     }
   }
@@ -102,8 +111,6 @@ export class TransferProjectionService {
     }
   }
   private async catalogItem(tx: Client, event: SyncEventDto, siteId: string, profile: DeviceProfile) {
-    if (profile === DeviceProfile.KITCHEN)
-      error('WRONG_PROFILE', 'A kitchen cannot manage product catalog items from a desktop', 403);
     const payload = object(event.payload);
     if (id(payload.site_id) !== siteId) error('WRONG_SITE', 'Catalog item belongs to another site', 403);
     const itemId = id(payload.item_id), sku = text(payload.sku, 100).toUpperCase();
@@ -113,15 +120,36 @@ export class TransferProjectionService {
     if (scale > 1000n || price > 2_147_483_647n || !Number.isSafeInteger(version) || version < 1 || typeof payload.active !== 'boolean')
       error('INVALID_CATALOG_ITEM', 'Catalog item values are invalid');
     const existing = await tx.item.findUnique({ where: { id: itemId } });
-    if (existing && version !== existing.version + 1)
+    if (payload.kind !== undefined && payload.kind !== ItemKind.PRODUCT && payload.kind !== ItemKind.INGREDIENT)
+      error('INVALID_CATALOG_ITEM', 'Catalog item kind is invalid');
+    const kind: ItemKind = payload.kind === ItemKind.INGREDIENT ? ItemKind.INGREDIENT :
+      payload.kind === ItemKind.PRODUCT ? ItemKind.PRODUCT : existing?.kind ?? ItemKind.PRODUCT;
+    const metadataUnchanged = !!existing && existing.sku === sku && existing.nameAr === nameAr && existing.unit === unit
+      && existing.quantityScale === Number(scale) && existing.kind === kind && existing.active === payload.active;
+    if (existing && version !== existing.version + 1 && !(profile !== DeviceProfile.KITCHEN && metadataUnchanged))
       error('STALE_VERSION', 'Catalog item was updated by another client', 409);
     if (!existing && version !== 1) error('DEPENDENCY_NOT_READY', 'Catalog item base version is missing', 409);
     const conflictingSku = await tx.item.findFirst({ where: { sku, id: { not: itemId } }, select: { id: true } });
     if (conflictingSku) error('SKU_ALREADY_EXISTS', 'Catalog SKU is already in use', 409);
+    const canonicalVersion = existing ? existing.version + 1 : 1;
     const item = existing
-      ? await tx.item.update({ where: { id: itemId }, data: { sku, nameAr, unit, quantityScale: Number(scale), retailPriceMinor: Number(price), active: payload.active, version } })
-      : await tx.item.create({ data: { id: itemId, sku, nameAr, unit, quantityScale: Number(scale), retailPriceMinor: Number(price), kind: 'PRODUCT', active: payload.active, version } });
+      ? await tx.item.update({ where: { id: itemId }, data: { sku, nameAr, unit, quantityScale: Number(scale), kind,
+        ...(profile === DeviceProfile.KITCHEN ? { retailPriceMinor: Number(price) } : {}), active: payload.active, version: canonicalVersion } })
+      : await tx.item.create({ data: { id: itemId, sku, nameAr, unit, quantityScale: Number(scale),
+        retailPriceMinor: profile === DeviceProfile.KITCHEN ? Number(price) : 0, kind, active: payload.active, version } });
     await tx.retailPriceRevision.create({ data: { itemId: item.id, priceMinor: item.retailPriceMinor, version: item.version, effectiveAt: new Date(event.occurred_at) } });
+    if (profile !== DeviceProfile.KITCHEN) {
+      const currentPrice = await tx.siteRetailPrice.findUnique({ where: { siteId_itemId: { siteId, itemId } } });
+      const priceVersion = (currentPrice?.version ?? 0) + 1;
+      await tx.siteRetailPrice.upsert({
+        where: { siteId_itemId: { siteId, itemId } },
+        create: { siteId, itemId, priceMinor: Number(price), version: priceVersion },
+        update: { priceMinor: Number(price), version: priceVersion },
+      });
+      await tx.siteRetailPriceRevision.create({
+        data: { siteId, itemId, priceMinor: Number(price), version: priceVersion, effectiveAt: new Date(event.occurred_at) },
+      });
+    }
   }
   private async archiveCatalogItem(tx: Client, event: SyncEventDto, siteId: string, profile: DeviceProfile) {
     if (profile === DeviceProfile.KITCHEN)
@@ -146,11 +174,18 @@ export class TransferProjectionService {
       const itemId = id(row.item_id), amount = quantity(row.quantity_scaled), key = { siteId, itemId, location: StockLocation.KITCHEN };
       const current = await tx.stockBalance.findUnique({ where: { siteId_itemId_location: key } });
       if (kind === 'WASTE' && (!current || current.quantityScaled < amount)) error('INSUFFICIENT_INGREDIENTS', 'Waste exceeds kitchen stock', 409);
+      const cost = kind === 'RECEIPT' ? quantity(row.total_cost_minor ?? 0, true)
+        : inventoryCostForUse(current?.inventoryCostMinor ?? 0n, current?.quantityScaled ?? 0n, amount);
       await tx.stockBalance.upsert({ where: { siteId_itemId_location: key },
-        create: { ...key, quantityScaled: kind === 'RECEIPT' ? amount : 0n, version: 1, asOfAt: new Date(event.occurred_at), sourceEventId: event.id },
-        update: { quantityScaled: kind === 'RECEIPT' ? { increment: amount } : { decrement: amount }, version: { increment: 1 }, asOfAt: new Date(event.occurred_at), sourceEventId: event.id } });
+        create: { ...key, quantityScaled: kind === 'RECEIPT' ? amount : 0n, inventoryCostMinor: kind === 'RECEIPT' ? cost : 0n,
+          version: 1, asOfAt: new Date(event.occurred_at), sourceEventId: event.id },
+        update: { quantityScaled: kind === 'RECEIPT' ? { increment: amount } : { decrement: amount },
+          inventoryCostMinor: kind === 'RECEIPT' ? { increment: cost } : { decrement: cost },
+          version: { increment: 1 }, asOfAt: new Date(event.occurred_at), sourceEventId: event.id } });
+      await tx.ingredientStockTransaction.create({ data: { id: row.line_id ? id(row.line_id) : randomUUID(), siteId, itemId,
+        sourceEventId: event.id, kind, quantityDeltaScaled: kind === 'RECEIPT' ? amount : -amount,
+        costMinor: cost, reason: text(payload.reason, 500), occurredAt: new Date(event.occurred_at) } });
     }
-    text(payload.reason, 500);
   }
   private async ingredientCount(tx: Client, event: SyncEventDto, siteId: string, profile: DeviceProfile) {
     if (profile !== DeviceProfile.KITCHEN) error('WRONG_PROFILE', 'Only the kitchen writer can count ingredients', 403);
@@ -165,10 +200,16 @@ export class TransferProjectionService {
       const key = { siteId, itemId, location: StockLocation.KITCHEN };
       const current = await tx.stockBalance.findUnique({ where: { siteId_itemId_location: key } });
       const expected = current?.quantityScaled ?? 0n, unexplained = expected - actual;
+      const removedCost = unexplained > 0n
+        ? inventoryCostForUse(current?.inventoryCostMinor ?? 0n, expected, unexplained) : 0n;
       await tx.ingredientVariance.create({ data: { id: id(row.line_id), siteId, itemId, businessDate: new Date(`${businessDate}T00:00:00.000Z`), expectedScaled: expected,
         actualScaled: actual, recordedWasteScaled: waste, unexplainedVarianceScaled: unexplained } });
       await tx.stockBalance.upsert({ where: { siteId_itemId_location: key }, create: { ...key, quantityScaled: actual, version: 1, asOfAt: new Date(event.occurred_at), sourceEventId: event.id },
-        update: { quantityScaled: actual, version: { increment: 1 }, asOfAt: new Date(event.occurred_at), sourceEventId: event.id } });
+        update: { quantityScaled: actual, inventoryCostMinor: { decrement: removedCost },
+          version: { increment: 1 }, asOfAt: new Date(event.occurred_at), sourceEventId: event.id } });
+      await tx.ingredientStockTransaction.create({ data: { id: id(row.line_id), siteId, itemId,
+        sourceEventId: event.id, kind: 'COUNT', quantityDeltaScaled: actual - expected,
+        costMinor: removedCost, reason: 'End of day count', occurredAt: new Date(event.occurred_at) } });
     }
   }
   private async cafeOrder(tx: Client, event: SyncEventDto, siteId: string) {
@@ -215,14 +256,60 @@ export class TransferProjectionService {
     await tx.cafePayment.create({ data: { id: id(p.payment_id), customerId, collectedAtSiteId: siteId, reference: `P-${id(p.payment_id)}`,
       amountMinor: amount, occurredAt: new Date(event.occurred_at), sourceEventId: event.id, allocations: { create: allocations } } });
   }
-  private async cafeStatus(tx: Client, event: SyncEventDto, siteId: string) {
+  private async cafeStatus(tx: Client, event: SyncEventDto, siteId: string, profile: DeviceProfile) {
     const p = object(event.payload), invoiceId = id(p.custom_order_id);
     if (!['CONFIRMED', 'READY', 'DELIVERED', 'CANCELLED'].includes(String(p.status)))
       error('INVALID_CAFE', 'Custom-order status transition is invalid');
-    const invoice = await tx.cafeInvoice.findUnique({ where: { id: invoiceId } });
+    const invoice = await tx.cafeInvoice.findUnique({ where: { id: invoiceId }, include: { lines: true } });
     if (!invoice || invoice.issuingSiteId !== siteId) error('DEPENDENCY_NOT_READY', 'Cafe invoice has not reached the server', 409);
     if (invoice.status === 'REVERSED') error('ORDER_FROZEN', 'Custom order has already been cancelled', 409);
+    if (p.status === 'DELIVERED' && profile === DeviceProfile.KITCHEN) {
+      if (invoice.fulfillmentEventId) error('ORDER_FROZEN', 'Cafe order was already fulfilled', 409);
+      const snapshots = lines(p.recipe_snapshot), ingredientRows = lines(p.ingredient_lines);
+      if (snapshots.length !== invoice.lines.length) error('INVALID_RECIPE', 'Cafe recipe snapshots are incomplete');
+      const expected = new Map<string, bigint>();
+      for (const line of invoice.lines) {
+        const snapshot = snapshots.find((value) => value.product_item_id === line.itemId);
+        const recipe = await tx.recipe.findUnique({ where: { productItemId: line.itemId }, include: { components: true } });
+        if (!snapshot || !recipe || !recipe.active || Number(quantity(snapshot.recipe_version)) !== recipe.version
+            || quantity(snapshot.output_scaled) !== line.quantityScaled)
+          error('STALE_RECIPE', 'Cafe order recipe is missing or stale', 409);
+        const snapshotComponents = lines(snapshot.components);
+        if (snapshotComponents.length !== recipe.components.length) error('STALE_RECIPE', 'Cafe recipe components changed', 409);
+        for (const component of recipe.components) {
+          const numerator = line.quantityScaled * component.quantityScaled;
+          if (numerator % recipe.outputScaled !== 0n) error('RECIPE_ROUNDING', 'Cafe quantity does not align with recipe');
+          const used = numerator / recipe.outputScaled;
+          const declared = snapshotComponents.find((value) => value.ingredient_item_id === component.ingredientItemId);
+          if (!declared || quantity(declared.quantity_scaled) !== used) error('STALE_RECIPE', 'Cafe recipe snapshot differs from saved recipe');
+          expected.set(component.ingredientItemId, (expected.get(component.ingredientItemId) ?? 0n) + used);
+        }
+      }
+      if (ingredientRows.length !== expected.size || ingredientRows.some((row) =>
+        expected.get(id(row.ingredient_item_id)) !== quantity(row.quantity_scaled)))
+        error('INVALID_RECIPE_CONSUMPTION', 'Cafe ingredient use differs from recipes');
+      let productionCost = 0n;
+      for (const row of ingredientRows) {
+        const itemId = id(row.ingredient_item_id), used = quantity(row.quantity_scaled);
+        const key = { siteId, itemId, location: StockLocation.KITCHEN };
+        const balance = await tx.stockBalance.findUnique({ where: { siteId_itemId_location: key } });
+        if (!balance || balance.quantityScaled < used) error('INSUFFICIENT_INGREDIENTS', 'Cafe production exceeds kitchen stock', 409);
+        const cost = inventoryCostForUse(balance.inventoryCostMinor, balance.quantityScaled, used);
+        if (quantity(row.cost_minor, true) !== cost) error('COST_OUT_OF_SYNC', 'Cafe production cost changed', 409);
+        productionCost += cost;
+        await tx.stockBalance.update({ where: { siteId_itemId_location: key }, data: {
+          quantityScaled: { decrement: used }, inventoryCostMinor: { decrement: cost },
+          version: { increment: 1 }, asOfAt: new Date(event.occurred_at), sourceEventId: event.id } });
+        await tx.ingredientStockTransaction.create({ data: { id: id(row.line_id), siteId, itemId,
+          sourceEventId: event.id, kind: 'CAFE_PRODUCTION', quantityDeltaScaled: -used, costMinor: cost,
+          reason: invoice.invoiceNumber, occurredAt: new Date(event.occurred_at) } });
+      }
+      if (quantity(p.production_cost_minor, true) !== productionCost) error('COST_OUT_OF_SYNC', 'Cafe production total differs from inventory', 409);
+      await tx.cafeInvoice.update({ where: { id: invoiceId }, data: {
+        fulfilledAt: new Date(event.occurred_at), fulfillmentEventId: event.id, fulfillmentCostMinor: productionCost } });
+    }
     if (p.status === 'CANCELLED') {
+      if (invoice.fulfillmentEventId) error('ORDER_FROZEN', 'Fulfilled cafe order cannot be cancelled', 409);
       if (!Array.isArray(p.stock_lines) || p.stock_lines.length !== 0) error('INVALID_CAFE', 'Cancellation cannot deduct stock');
       await tx.cafeInvoice.update({ where: { id: invoiceId }, data: { status: 'REVERSED' } });
     }
@@ -399,12 +486,25 @@ export class TransferProjectionService {
     }
     if (ingredientRows.length !== expectedIngredients.size || ingredientRows.some((row) => expectedIngredients.get(id(row.ingredient_item_id)) !== quantity(row.quantity_scaled)))
       error('INVALID_RECIPE_CONSUMPTION', 'Ingredient deduction differs from recipe snapshots');
+    let productionCostMinor = 0n;
     for (const row of ingredientRows) {
       const itemId = id(row.ingredient_item_id), used = quantity(row.quantity_scaled), key = { siteId, itemId, location: StockLocation.KITCHEN };
       const balance = await tx.stockBalance.findUnique({ where: { siteId_itemId_location: key } });
       if (!balance || balance.quantityScaled < used) error('INSUFFICIENT_INGREDIENTS', 'Kitchen ingredient stock is insufficient', 409);
-      await tx.stockBalance.update({ where: { siteId_itemId_location: key }, data: { quantityScaled: { decrement: used }, version: { increment: 1 }, asOfAt: new Date(event.occurred_at), sourceEventId: event.id } });
+      const cost = inventoryCostForUse(balance.inventoryCostMinor, balance.quantityScaled, used);
+      if (row.cost_minor !== undefined && quantity(row.cost_minor, true) !== cost)
+        error('COST_OUT_OF_SYNC', 'Kitchen inventory cost changed; refresh before dispatch', 409);
+      productionCostMinor += cost;
+      await tx.stockBalance.update({ where: { siteId_itemId_location: key }, data: {
+        quantityScaled: { decrement: used }, inventoryCostMinor: { decrement: cost },
+        version: { increment: 1 }, asOfAt: new Date(event.occurred_at), sourceEventId: event.id } });
+      await tx.ingredientStockTransaction.create({ data: { id: row.line_id ? id(row.line_id) : randomUUID(),
+        siteId, itemId, sourceEventId: event.id, kind: 'PRODUCTION_CONSUMPTION',
+        quantityDeltaScaled: -used, costMinor: cost, reason: text(payload.reference, 120),
+        occurredAt: new Date(event.occurred_at) } });
     }
+    if (payload.production_cost_minor !== undefined && quantity(payload.production_cost_minor, true) !== productionCostMinor)
+      error('COST_OUT_OF_SYNC', 'Production cost does not match ingredient stock', 409);
     await tx.kitchenShipment.create({ data: {
       id: shipmentId, requestId, sourceKitchenSiteId: siteId, destinationSiteId: request.requestingSiteId,
       reference: text(payload.reference, 120), version: Number(payload.version) || 1,
@@ -495,6 +595,7 @@ export class TransferProjectionService {
       contact: typeof payload.phone === 'string' ? payload.phone.trim().slice(0, 200) : null,
       notes: [payload.kind, payload.address].filter((value) => typeof value === 'string' && value.trim()).join(' | ').slice(0, 500) || null,
       originSiteId: siteId,
+      version: Number(payload.version) || 1,
       sourceEventId: event.id,
       prices: { create: rows.map((row) => ({
         itemId: id(row.item_id),
@@ -502,6 +603,45 @@ export class TransferProjectionService {
         version: Number(payload.version) || 1,
       })) },
     } });
+  }
+
+  private async updateCafeCustomer(tx: Client, event: SyncEventDto, siteId: string, profile: DeviceProfile) {
+    const payload = object(event.payload), customerId = id(payload.customer_id);
+    if (id(payload.site_id) !== siteId) error('WRONG_SITE', 'Cafe update belongs to another site', 403);
+    const customer = await tx.cafeCustomer.findUnique({ where: { id: customerId } });
+    if (!customer) error('DEPENDENCY_NOT_READY', 'Cafe has not reached the server', 409);
+    if (customer.originSiteId !== siteId && profile !== DeviceProfile.KITCHEN)
+      error('WRONG_SITE', 'Only the originating site or Kitchen can edit this cafe', 403);
+    const version = Number(payload.version);
+    if (!Number.isSafeInteger(version) || version !== customer.version + 1)
+      error('STALE_VERSION', 'Cafe changed on the server', 409);
+    await tx.cafeCustomer.update({ where: { id: customerId }, data: {
+      name: text(payload.name, 200),
+      contact: typeof payload.phone === 'string' ? payload.phone.trim().slice(0, 200) : null,
+      notes: typeof payload.notes === 'string' ? payload.notes.trim().slice(0, 500) : null,
+      version,
+    } });
+  }
+  private async recipe(tx: Client, event: SyncEventDto, profile: DeviceProfile) {
+    if (profile !== DeviceProfile.KITCHEN) error('WRONG_PROFILE', 'Only Kitchen can edit recipes', 403);
+    const payload = object(event.payload), productId = id(payload.product_item_id);
+    const outputScaled = quantity(payload.output_scaled), version = Number(payload.version);
+    const components = lines(payload.components).map((row) => ({ ingredientItemId: id(row.ingredient_item_id), quantityScaled: quantity(row.quantity_scaled) }));
+    if (new Set(components.map((row) => row.ingredientItemId)).size !== components.length || !Number.isSafeInteger(version) || version < 1)
+      error('INVALID_RECIPE', 'Recipe components or version are invalid');
+    const product = await tx.item.findFirst({ where: { id: productId, kind: ItemKind.PRODUCT, active: true } });
+    const ingredients = await tx.item.findMany({ where: { id: { in: components.map((row) => row.ingredientItemId) }, kind: ItemKind.INGREDIENT, active: true } });
+    if (!product || ingredients.length !== components.length) error('INVALID_RECIPE_ITEMS', 'Recipe requires one active product and active ingredients', 409);
+    const existing = await tx.recipe.findUnique({ where: { productItemId: productId } });
+    if (version !== (existing?.version ?? 0) + 1) error('STALE_VERSION', 'Recipe changed on the server', 409);
+    if (existing) {
+      await tx.recipeComponent.deleteMany({ where: { recipeId: existing.id } });
+      await tx.recipe.update({ where: { id: existing.id }, data: { outputScaled, version,
+        components: { create: components } } });
+    } else {
+      await tx.recipe.create({ data: { productItemId: productId, outputScaled, version,
+        components: { create: components } } });
+    }
   }
 
   private async requestReceived(tx: Client, event: SyncEventDto, siteId: string, profile: DeviceProfile) {

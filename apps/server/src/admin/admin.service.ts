@@ -299,12 +299,13 @@ export class AdminService {
         ...(input.contact !== undefined ? { contact: input.contact.trim() || null } : {}),
         ...(input.notes !== undefined ? { notes: input.notes.trim() || null } : {}),
         ...(input.active !== undefined ? { active: input.active } : {}),
+        version: { increment: 1 },
       },
     });
   }
 
   archiveCafeCustomer(id: string) {
-    return this.prisma.cafeCustomer.update({ where: { id }, data: { active: false } });
+    return this.prisma.cafeCustomer.update({ where: { id }, data: { active: false, version: { increment: 1 } } });
   }
 
   setCafePrice(customerId: string, itemId: string, input: SetCafePriceDto) {

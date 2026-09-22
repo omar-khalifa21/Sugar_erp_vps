@@ -17,6 +17,12 @@ namespace SugarERP.Kitchen.App;
 public sealed partial class MainWindow : Window
 {
     private readonly KitchenStore _store; private readonly KitchenSyncService _sync; private KitchenRequestRecord? _selected;
+    private KitchenProduct? _selectedItem;
+    private Guid? _selectedCafeId;
+    private int _selectedCafeVersion;
+    private readonly Dictionary<Guid, long> _recipeDraft = [];
+    private int _recipeExpectedVersion;
+    private bool _loadingRecipeChoices;
     private WaredRow[] _waredRows = [];
     private string _waredFilter = "PENDING";
     private bool _busy;
@@ -54,6 +60,26 @@ public sealed partial class MainWindow : Window
         var recipes = await db.Recipes.AsNoTracking().Include(x => x.Components).ToListAsync();
         var recipesByProduct = recipes.ToDictionary(x => x.ProductItemId);
         var products = await db.Products.AsNoTracking().ToDictionaryAsync(x => x.Id);
+        var selectedItemId = _selectedItem?.Id;
+        var itemRows = products.Values.Where(x => x.Active).OrderBy(x => x.Name)
+            .Select(x => new KitchenItemRow(x, ingredientsById.GetValueOrDefault(x.Id), recipesByProduct.GetValueOrDefault(x.Id), ingredientsById)).ToArray();
+        this.FindControl<DataGrid>("ProductsGrid")!.ItemsSource = itemRows.Where(x => x.Item.Kind == "PRODUCT").ToArray();
+        this.FindControl<DataGrid>("IngredientsGrid")!.ItemsSource = itemRows.Where(x => x.Item.Kind == "INGREDIENT").ToArray();
+        if (selectedItemId is Guid selectedId && products.TryGetValue(selectedId, out var selectedProduct))
+            (selectedProduct.Kind == "INGREDIENT" ? this.FindControl<DataGrid>("IngredientsGrid")! : this.FindControl<DataGrid>("ProductsGrid")!)
+                .SelectedItem = itemRows.FirstOrDefault(x => x.Item.Id == selectedId);
+        var selectedRecipeProductId = (this.FindControl<ComboBox>("RecipeProduct")!.SelectedItem as ProductChoice)?.Id;
+        _loadingRecipeChoices = true;
+        this.FindControl<ComboBox>("RecipeProduct")!.ItemsSource = products.Values.Where(x => x.Active && x.Kind == "PRODUCT")
+            .OrderBy(x => x.Name).Select(x => new ProductChoice(x.Id, x.Name)).ToArray();
+        this.FindControl<ComboBox>("RecipeProduct")!.SelectedItem = ((IEnumerable<ProductChoice>)this.FindControl<ComboBox>("RecipeProduct")!.ItemsSource!)
+            .FirstOrDefault(x => x.Id == selectedRecipeProductId);
+        var ingredientChoices = products.Values.Where(x => x.Active && x.Kind == "INGREDIENT")
+            .OrderBy(x => x.Name).Select(x => new ProductChoice(x.Id, x.Name)).ToArray();
+        this.FindControl<ComboBox>("RecipeIngredient")!.ItemsSource = ingredientChoices;
+        this.FindControl<ComboBox>("PurchaseIngredient")!.ItemsSource = ingredientChoices;
+        _loadingRecipeChoices = false;
+        RefreshRecipeDraft(products, ingredientsById);
         var committed = new Dictionary<Guid, long>();
         foreach (var line in activeRequests.SelectMany(x => x.Lines))
         {
@@ -85,8 +111,11 @@ public sealed partial class MainWindow : Window
                 Version = recipe.Version
             };
         }).ToArray();
-        RecipeSearch_Changed(null, null!);
-        this.FindControl<ComboBox>("CafeCustomer")!.ItemsSource = (await db.CafeCustomers.AsNoTracking().Where(x => x.Active && !x.HiddenLocally).OrderBy(x => x.Name).ToListAsync()).Select(x => new CafeCustomerOption(x.Id, x.Name)).ToArray();
+        this.FindControl<TextBlock>("RecipeCost")!.Text = _recipeRows.Length == 0 ? "تكلفة الوصفة: —" : this.FindControl<TextBlock>("RecipeCost")!.Text;
+        var cafeOptions = (await db.CafeCustomers.AsNoTracking().Where(x => x.Active && !x.HiddenLocally).OrderBy(x => x.Name).ToListAsync())
+            .Select(x => new CafeCustomerOption(x.Id, x.Name)).ToArray();
+        this.FindControl<ComboBox>("CafeCustomer")!.ItemsSource = cafeOptions;
+        this.FindControl<ComboBox>("CafeCustomer")!.SelectedItem = cafeOptions.FirstOrDefault(x => x.Id == _selectedCafeId);
         var customOrders = await _sync.GetCustomOrdersAsync();
         this.FindControl<DataGrid>("CustomOrdersGrid")!.ItemsSource = customOrders.Select(x => new KitchenOrderRow(x)).ToArray();
         var configuration = await db.Configuration.AsNoTracking().SingleOrDefaultAsync();
@@ -100,6 +129,7 @@ public sealed partial class MainWindow : Window
         this.FindControl<TextBlock>("HomeRecipes")!.Text = $"{_recipeRows.Length} وصفة منشورة";
         this.FindControl<TextBlock>("HomeRequests")!.Text = $"{activeRequests.Length} طلب قيد التنفيذ";
         this.FindControl<TextBlock>("HomeOrders")!.Text = $"{customOrders.Count(x => x.Status is not (CustomOrderStatus.Delivered or CustomOrderStatus.Cancelled))} طلب مفتوح";
+        this.FindControl<TextBlock>("HomeItems")!.Text = $"{itemRows.Count(x => x.Item.Kind == "PRODUCT")} منتج · {ingredientChoices.Length} خامة";
         this.FindControl<TextBlock>("ServerStatusText")!.Text = configuration is null ? "الجهاز غير مربوط بالخادم" : $"مرتبط بـ {configuration.SiteName}";
     }
     private void Home_Click(object? sender, RoutedEventArgs e) => this.FindControl<TabControl>("MainTabs")!.SelectedIndex = 0;
@@ -107,7 +137,8 @@ public sealed partial class MainWindow : Window
     private void OpenStock_Click(object? sender, RoutedEventArgs e) => this.FindControl<TabControl>("MainTabs")!.SelectedIndex = 3;
     private void OpenRecipes_Click(object? sender, RoutedEventArgs e) => this.FindControl<TabControl>("MainTabs")!.SelectedIndex = 4;
     private void OpenOrders_Click(object? sender, RoutedEventArgs e) => this.FindControl<TabControl>("MainTabs")!.SelectedIndex = 5;
-    private void OpenSettings_Click(object? sender, RoutedEventArgs e) => this.FindControl<TabControl>("MainTabs")!.SelectedIndex = 6;
+    private void OpenItems_Click(object? sender, RoutedEventArgs e) => this.FindControl<TabControl>("MainTabs")!.SelectedIndex = 6;
+    private void OpenSettings_Click(object? sender, RoutedEventArgs e) => this.FindControl<TabControl>("MainTabs")!.SelectedIndex = 7;
     private static SyncUploadEvent? ParseUpload(KitchenOutbox row)
     {
         try
@@ -157,11 +188,6 @@ public sealed partial class MainWindow : Window
             "SYNCING" => ("Syncing · جارٍ المزامنة", Brush.Parse("#175CD3"), Brush.Parse("#EAF2FF")),
             _ => ("Offline · غير متصل", Brush.Parse("#B42318"), Brush.Parse("#FDECEC"))
         };
-    }
-    private void RecipeSearch_Changed(object? sender, TextChangedEventArgs e)
-    {
-        var search = this.FindControl<TextBox>("RecipeSearch")?.Text?.Trim() ?? "";
-        this.FindControl<DataGrid>("RecipesGrid")!.ItemsSource = _recipeRows.Where(x => search.Length == 0 || x.ProductName.Contains(search, StringComparison.CurrentCultureIgnoreCase)).ToArray();
     }
     private async void Enroll_Click(object? sender, RoutedEventArgs e) { await Run(async () => { SetConnectionState("SYNCING"); await _sync.EnrollAsync(new Uri(ApiUrl.Text!.Trim()), EnrollmentToken.Text!.Trim(), DeviceName.Text!.Trim()); EnrollmentToken.Text = ""; var applied = await _sync.PullAsync(forceRetry: true); SetConnectionState("CONNECTED"); return $"تم ربط جهاز المطبخ وبدأت المزامنة التلقائية — {applied} تحديث."; }); await RefreshAsync(); }
     private async void Sync_Click(object? sender, RoutedEventArgs e) { SetConnectionState("SYNCING"); await Run(async () => { var applied = await _sync.PullAsync(forceRetry: true); SetConnectionState("CONNECTED"); return $"اكتملت المزامنة؛ تم تطبيق {applied} تحديث."; }); await RefreshAsync(); }
@@ -250,16 +276,208 @@ public sealed partial class MainWindow : Window
         await Run(() => { var path = folders[0].TryGetLocalPath() ?? throw new IOException("اختر مجلداً محلياً."); _reports.SaveDirectory(path); this.FindControl<TextBox>("ReportsDirectory")!.Text = path; return Task.FromResult("تم حفظ مجلد التقارير؛ الملفات السابقة لم تتغير."); });
     }
     private IReadOnlyDictionary<Guid, long> ReadIngredientInputs(bool requireAll) { var rows = (this.FindControl<DataGrid>("InventoryGrid")!.ItemsSource as IEnumerable<IngredientEntry>)?.ToArray() ?? []; return rows.Where(x => requireAll || !string.IsNullOrWhiteSpace(x.InputDisplay)).ToDictionary(x => x.ItemId, x => x.InputScaled); }
-    private async void ReceiveIngredients_Click(object? sender, RoutedEventArgs e) { var reason = this.FindControl<TextBox>("InventoryReason")!.Text ?? ""; await Run(async () => { await _sync.ReceiveIngredientsAsync(ReadIngredientInputs(false), reason); return "تم تسجيل استلام الخامات ومزامنته بشكل موثق."; }); await RefreshAsync(); }
+    private async void ReceiveIngredients_Click(object? sender, RoutedEventArgs e)
+    {
+        if (this.FindControl<ComboBox>("PurchaseIngredient")!.SelectedItem is not ProductChoice selected)
+        { StatusText.Text = "اختر الخامة أولاً."; return; }
+        var reason = this.FindControl<TextBox>("InventoryReason")!.Text ?? "شراء خامات";
+        await Run(async () =>
+        {
+            await using var db = _store.Open();
+            var ingredient = await db.Products.AsNoTracking().SingleAsync(x => x.Id == selected.Id && x.Kind == "INGREDIENT");
+            var amount = ParseNormalizedQuantity(this.FindControl<TextBox>("PurchaseQuantity")!.Text,
+                SelectedUnit("PurchaseUnit"), ingredient);
+            var cost = ParseMoneyMinor(this.FindControl<TextBox>("PurchaseCost")!.Text);
+            await _sync.ReceiveIngredientPurchaseAsync(selected.Id, amount, cost, reason);
+            return "تم تسجيل الشراء؛ حُسب متوسط تكلفة الخامة تلقائياً وسيُزامن مع الخادم.";
+        });
+        await RefreshAsync();
+    }
     private async void WasteIngredients_Click(object? sender, RoutedEventArgs e) { var reason = this.FindControl<TextBox>("InventoryReason")!.Text ?? ""; await Run(async () => { await _sync.RecordWasteAsync(ReadIngredientInputs(false), reason); return "تم تسجيل الهالك وخصمه مرة واحدة."; }); await RefreshAsync(); }
     private async void CountIngredients_Click(object? sender, RoutedEventArgs e) { if (!await ConfirmAsync("إقفال جرد اليوم", "سيتم حفظ الكميات الفعلية وفروق الجرد كسجل غير قابل للتعديل. هل تريد المتابعة؟")) return; await Run(async () => { await _sync.CountIngredientsAsync(ReadIngredientInputs(true)); var report = await new KitchenDailyReportWriter(_store).WriteLatestCountAsync(_reports.GetDirectory()); return $"تم إقفال الجرد وحفظ تقرير Excel غير قابل للاستبدال: {report.Path}"; }); await RefreshAsync(); }
+    private static long ParseMoneyMinor(string? text)
+    {
+        if (!decimal.TryParse(text, NumberStyles.Number, CultureInfo.InvariantCulture, out var value)
+            || value <= 0 || value * 100m != decimal.Truncate(value * 100m))
+            throw new InvalidOperationException("أدخل التكلفة الإجمالية بالجنيه، مثل 500 أو 180.50.");
+        return checked((long)(value * 100m));
+    }
+    private string SelectedUnit(string controlName) =>
+        (this.FindControl<ComboBox>(controlName)!.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "";
+    private static long ParseNormalizedQuantity(string? text, string enteredUnit, KitchenProduct ingredient)
+    {
+        if (!decimal.TryParse(text, NumberStyles.Number, CultureInfo.InvariantCulture, out var amount) || amount <= 0)
+            throw new InvalidOperationException("أدخل كمية صحيحة أكبر من الصفر.");
+        static decimal Factor(string unit) => unit.Trim().ToLowerInvariant() switch
+        {
+            "kg" or "كيلو" => 1000m, "g" or "جرام" => 1m,
+            "l" or "لتر" => 1000m, "ml" or "مل" => 1m,
+            "قطعة" or "pcs" or "piece" or "egg" => 1m,
+            _ => throw new InvalidOperationException("استخدم g أو kg أو ml أو L أو قطعة كوحدة للخامة.")
+        };
+        var itemUnit = ingredient.Unit.Trim().ToLowerInvariant();
+        var weight = itemUnit is "g" or "kg" or "جرام" or "كيلو";
+        var volume = itemUnit is "ml" or "l" or "مل" or "لتر";
+        if (weight && enteredUnit is not ("g" or "kg") || volume && enteredUnit is not ("ml" or "L")
+            || !weight && !volume && enteredUnit != "قطعة")
+            throw new InvalidOperationException($"وحدة الشراء لا تطابق وحدة {ingredient.Name}.");
+        var scaled = amount * Factor(enteredUnit) / Factor(ingredient.Unit) * ingredient.QuantityScale;
+        if (scaled != decimal.Truncate(scaled) || scaled > long.MaxValue)
+            throw new InvalidOperationException("كمية الشراء أدق من دقة الخامة؛ عدّل وحدة التخزين أو الكمية.");
+        return checked((long)scaled);
+    }
+    private async void RecipeProduct_Selected(object? sender, SelectionChangedEventArgs e)
+    {
+        if (_loadingRecipeChoices || this.FindControl<ComboBox>("RecipeProduct")!.SelectedItem is not ProductChoice selected) return;
+        await using var db = _store.Open();
+        var recipe = await db.Recipes.AsNoTracking().Include(x => x.Components)
+            .SingleOrDefaultAsync(x => x.ProductItemId == selected.Id);
+        var product = await db.Products.AsNoTracking().SingleAsync(x => x.Id == selected.Id);
+        _recipeExpectedVersion = recipe?.Version ?? 0;
+        _recipeDraft.Clear();
+        if (recipe is not null) foreach (var line in recipe.Components) _recipeDraft[line.IngredientItemId] = line.QuantityScaled;
+        this.FindControl<TextBox>("RecipeOutput")!.Text = recipe is null ? "1"
+            : ((decimal)recipe.OutputScaled / product.QuantityScale).ToString("0.###", CultureInfo.InvariantCulture);
+        RefreshRecipeDraft(await db.Products.AsNoTracking().ToDictionaryAsync(x => x.Id),
+            await db.Ingredients.AsNoTracking().ToDictionaryAsync(x => x.ItemId));
+    }
+    private async void AddRecipeIngredient_Click(object? sender, RoutedEventArgs e)
+    {
+        if (this.FindControl<ComboBox>("RecipeIngredient")!.SelectedItem is not ProductChoice selected)
+        { StatusText.Text = "اختر خامة للوصفة."; return; }
+        await Run(async () =>
+        {
+            await using var db = _store.Open();
+            var ingredient = await db.Products.AsNoTracking().SingleAsync(x => x.Id == selected.Id && x.Kind == "INGREDIENT");
+            _recipeDraft[selected.Id] = ParseNormalizedQuantity(this.FindControl<TextBox>("RecipeQuantity")!.Text,
+                SelectedUnit("RecipeUnit"), ingredient);
+            RefreshRecipeDraft(await db.Products.AsNoTracking().ToDictionaryAsync(x => x.Id),
+                await db.Ingredients.AsNoTracking().ToDictionaryAsync(x => x.ItemId));
+            return "تمت إضافة الخامة للوصفة؛ احفظ الوصفة لتزامنها.";
+        });
+    }
+    private async void RemoveRecipeIngredient_Click(object? sender, RoutedEventArgs e)
+    {
+        if (this.FindControl<DataGrid>("RecipeComponentsGrid")!.SelectedItem is not RecipeComponentEntry row) return;
+        _recipeDraft.Remove(row.ItemId);
+        await using var db = _store.Open();
+        RefreshRecipeDraft(await db.Products.AsNoTracking().ToDictionaryAsync(x => x.Id),
+            await db.Ingredients.AsNoTracking().ToDictionaryAsync(x => x.ItemId));
+    }
+    private async void SaveRecipe_Click(object? sender, RoutedEventArgs e)
+    {
+        if (this.FindControl<ComboBox>("RecipeProduct")!.SelectedItem is not ProductChoice selected)
+        { StatusText.Text = "اختر المنتج أولاً."; return; }
+        await Run(async () =>
+        {
+            await using var db = _store.Open();
+            var product = await db.Products.AsNoTracking().SingleAsync(x => x.Id == selected.Id);
+            if (!decimal.TryParse(this.FindControl<TextBox>("RecipeOutput")!.Text, NumberStyles.Number,
+                CultureInfo.InvariantCulture, out var amount) || amount <= 0
+                || amount * product.QuantityScale != decimal.Truncate(amount * product.QuantityScale))
+                throw new InvalidOperationException("كمية الناتج غير صالحة.");
+            await _sync.SaveRecipeAsync(selected.Id, _recipeExpectedVersion,
+                checked((long)(amount * product.QuantityScale)), new Dictionary<Guid, long>(_recipeDraft));
+            _recipeExpectedVersion++;
+            return "حُفظت الوصفة وستصل للخادم تلقائياً.";
+        });
+        await RefreshAsync();
+    }
+    private void RefreshRecipeDraft(IReadOnlyDictionary<Guid, KitchenProduct> products,
+        IReadOnlyDictionary<Guid, KitchenIngredientBalance> balances)
+    {
+        var rows = _recipeDraft.Where(x => products.ContainsKey(x.Key)).Select(x =>
+            new RecipeComponentEntry(products[x.Key], balances.GetValueOrDefault(x.Key), x.Value)).ToArray();
+        this.FindControl<DataGrid>("RecipeComponentsGrid")!.ItemsSource = rows;
+        this.FindControl<TextBlock>("RecipeCost")!.Text = $"تكلفة الوصفة: {rows.Sum(x => x.CostMinor) / 100m:0.00} ج.م";
+    }
+    private void NewProduct_Click(object? sender, RoutedEventArgs e) => NewItem("PRODUCT");
+    private void NewIngredient_Click(object? sender, RoutedEventArgs e) => NewItem("INGREDIENT");
+    private void NewItem(string kind)
+    {
+        _selectedItem = null;
+        this.FindControl<DataGrid>("ProductsGrid")!.SelectedItem = null;
+        this.FindControl<DataGrid>("IngredientsGrid")!.SelectedItem = null;
+        this.FindControl<TextBox>("ItemName")!.Text = "";
+        this.FindControl<TextBox>("ItemUnit")!.Text = kind == "PRODUCT" ? "قطعة" : "g";
+        this.FindControl<TextBox>("ItemScale")!.Text = "1";
+        this.FindControl<TextBox>("ItemBasePrice")!.Text = "0";
+        this.FindControl<ComboBox>("ItemKind")!.SelectedIndex = kind == "PRODUCT" ? 0 : 1;
+    }
+    private void ItemKind_Changed(object? sender, SelectionChangedEventArgs e)
+    {
+        var kind = (this.FindControl<ComboBox>("ItemKind")?.SelectedItem as ComboBoxItem)?.Tag?.ToString();
+        var price = this.FindControl<TextBox>("ItemBasePrice");
+        if (price is not null) price.IsEnabled = kind == "PRODUCT";
+    }
+    private void Item_Selected(object? sender, SelectionChangedEventArgs e)
+    {
+        if ((sender as DataGrid)?.SelectedItem is not KitchenItemRow row) return;
+        _selectedItem = row.Item;
+        this.FindControl<TextBox>("ItemName")!.Text = row.Item.Name;
+        this.FindControl<TextBox>("ItemUnit")!.Text = row.Item.Unit;
+        this.FindControl<TextBox>("ItemScale")!.Text = row.Item.QuantityScale.ToString(CultureInfo.InvariantCulture);
+        this.FindControl<ComboBox>("ItemKind")!.SelectedIndex = row.Item.Kind == "INGREDIENT" ? 1 : 0;
+        this.FindControl<TextBox>("ItemBasePrice")!.Text = (row.Item.BasePriceMinor / 100m).ToString("0.00", CultureInfo.InvariantCulture);
+    }
+    private async void SaveItem_Click(object? sender, RoutedEventArgs e)
+    {
+        var name = this.FindControl<TextBox>("ItemName")!.Text ?? "";
+        var unit = this.FindControl<TextBox>("ItemUnit")!.Text ?? "";
+        if (!int.TryParse(this.FindControl<TextBox>("ItemScale")!.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var scale))
+        { StatusText.Text = "دقة الوحدة غير صالحة."; return; }
+        var selector = this.FindControl<ComboBox>("ItemKind")!;
+        var kind = (selector.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "PRODUCT";
+        if (!decimal.TryParse(this.FindControl<TextBox>("ItemBasePrice")!.Text, NumberStyles.Number,
+                CultureInfo.InvariantCulture, out var price) || price < 0 || price * 100m != decimal.Truncate(price * 100m))
+        { StatusText.Text = "سعر البيع غير صالح."; return; }
+        KitchenProduct? saved = null;
+        await Run(async () =>
+        {
+            saved = await _sync.SaveCatalogItemAsync(_selectedItem?.Id, _selectedItem?.Version, name, unit, scale,
+                kind, checked((long)(price * 100m)));
+            return "تم حفظ الصنف محلياً؛ ستتم مزامنته تلقائياً مع الخادم والفروع.";
+        });
+        if (saved is not null) _selectedItem = saved;
+        await RefreshAsync();
+    }
     private async void CafeCustomer_Selected(object? sender, SelectionChangedEventArgs e)
     {
         if (this.FindControl<ComboBox>("CafeCustomer")!.SelectedItem is not CafeCustomerOption customer) return;
         await using var db = _store.Open();
+        var selectedCafe = await db.CafeCustomers.AsNoTracking().SingleAsync(x => x.Id == customer.Id);
+        _selectedCafeId = customer.Id; _selectedCafeVersion = selectedCafe.Version;
+        this.FindControl<TextBox>("CafeName")!.Text = selectedCafe.Name;
+        this.FindControl<TextBox>("CafeContact")!.Text = selectedCafe.Contact;
         var prices = await db.CafePrices.AsNoTracking().Include(x => x.Item).Where(x => x.CustomerId == customer.Id && x.Item.Active).OrderBy(x => x.Item.Name).ToListAsync();
-        this.FindControl<DataGrid>("CafeItemsGrid")!.ItemsSource = prices.Select(x => new CafeItemEntry(x)).ToList();
+        var availableProducts = await db.Products.AsNoTracking().Where(x => x.Active && x.Kind == "PRODUCT").OrderBy(x => x.Name).ToListAsync();
+        this.FindControl<DataGrid>("CafeItemsGrid")!.ItemsSource = availableProducts.Select(product =>
+            new CafeItemEntry(prices.FirstOrDefault(x => x.ItemId == product.Id)
+                ?? new KitchenCafePrice { CustomerId = customer.Id, ItemId = product.Id,
+                    Item = product, UnitPriceMinor = product.BasePriceMinor, Version = 1 })).ToList();
         this.FindControl<TextBox>("CustomDue")!.Text = DateTime.Now.AddDays(1).ToString("yyyy-MM-dd 12:00", CultureInfo.InvariantCulture);
+    }
+    private void NewCafe_Click(object? sender, RoutedEventArgs e)
+    {
+        _selectedCafeId = null; _selectedCafeVersion = 0;
+        this.FindControl<ComboBox>("CafeCustomer")!.SelectedItem = null;
+        this.FindControl<TextBox>("CafeName")!.Text = "";
+        this.FindControl<TextBox>("CafeContact")!.Text = "";
+        this.FindControl<DataGrid>("CafeItemsGrid")!.ItemsSource = null;
+    }
+    private async void SaveCafe_Click(object? sender, RoutedEventArgs e)
+    {
+        KitchenCafeCustomer? saved = null;
+        await Run(async () =>
+        {
+            saved = await _sync.SaveCafeAsync(_selectedCafeId,
+                _selectedCafeId is null ? null : _selectedCafeVersion,
+                this.FindControl<TextBox>("CafeName")!.Text ?? "",
+                this.FindControl<TextBox>("CafeContact")!.Text ?? "");
+            return "حُفظ الكافيه محلياً وسيظهر تلقائياً في الخادم والفروع.";
+        });
+        if (saved is not null) { _selectedCafeId = saved.Id; _selectedCafeVersion = saved.Version; }
+        await RefreshAsync();
     }
     private async void DeleteCafeCustomer_Click(object? sender, RoutedEventArgs e)
     {
@@ -284,6 +502,14 @@ public sealed partial class MainWindow : Window
         if (created is not null) await PrintOrderAsync(created.Id);
     }
     private async void PrintCustomOrder_Click(object? sender, RoutedEventArgs e) { if (this.FindControl<DataGrid>("CustomOrdersGrid")!.SelectedItem is not KitchenOrderRow row) { StatusText.Text = "اختر فاتورة للطباعة."; return; } await PrintOrderAsync(row.Id); }
+    private async void DeliverCafeOrder_Click(object? sender, RoutedEventArgs e)
+    {
+        if (this.FindControl<DataGrid>("CustomOrdersGrid")!.SelectedItem is not KitchenOrderRow row)
+        { StatusText.Text = "اختر طلب الكافيه أولاً."; return; }
+        if (!await ConfirmAsync("تأكيد تجهيز وتسليم الطلب", $"سيتم خصم خامات وصفات {row.OrderNumber} مرة واحدة. هل تؤكد التسليم؟")) return;
+        await Run(async () => { await _sync.DeliverCafeOrderAsync(row.Id); return "تم تسليم الطلب وخصم خاماته مرة واحدة؛ ستصل الحركة للخادم تلقائياً."; });
+        await RefreshAsync();
+    }
     private async Task PrintOrderAsync(Guid orderId)
     {
         var printer = this.FindControl<ComboBox>("PrinterName")!.SelectedItem?.ToString() ?? "";
@@ -305,7 +531,31 @@ public sealed class IngredientEntry
 {
     private readonly KitchenIngredientBalance _item; public IngredientEntry(KitchenIngredientBalance item, long expectedScaled) { _item = item; ExpectedScaled = expectedScaled; }
     public Guid ItemId => _item.ItemId; public string Name => _item.Name; public long ExpectedScaled { get; } public string CurrentDisplay => $"{(decimal)_item.QuantityScaled / _item.QuantityScale:0.###} {_item.Unit}"; public string ExpectedDisplay => $"{(decimal)ExpectedScaled / _item.QuantityScale:0.###} {_item.Unit}"; public string StockStatus => ExpectedScaled < 0 ? "عجز" : ExpectedScaled == 0 ? "ينفد" : "متاح"; public string InputDisplay { get; set; } = "";
+    public string AverageCostDisplay => _item.QuantityScaled <= 0 ? "—" : $"{(decimal)_item.InventoryCostMinor / _item.QuantityScaled * _item.QuantityScale / 100m:0.###} ج.م / {_item.Unit}";
     public long InputScaled => decimal.TryParse(InputDisplay, out var value) && value >= 0 && decimal.Truncate(value * _item.QuantityScale) == value * _item.QuantityScale ? checked((long)(value * _item.QuantityScale)) : throw new InvalidOperationException($"كمية {_item.Name} غير صالحة.");
+}
+public sealed class KitchenItemRow(KitchenProduct item, KitchenIngredientBalance? balance,
+    KitchenRecipeRecord? recipe, IReadOnlyDictionary<Guid, KitchenIngredientBalance> ingredients)
+{
+    public KitchenProduct Item { get; } = item;
+    public string Name => Item.Name;
+    public string KindDisplay => Item.Kind == "INGREDIENT" ? "خامة" : "منتج";
+    public string UnitDisplay => $"{Item.Unit} × {Item.QuantityScale}";
+    public int Version => Item.Version;
+    public string BasePriceDisplay => Item.Kind == "PRODUCT" ? $"{Item.BasePriceMinor / 100m:0.00} ج.م" : "—";
+    public string CostDisplay => Item.Kind == "INGREDIENT"
+        ? balance is null || balance.QuantityScaled <= 0 ? "—" : $"{(decimal)balance.InventoryCostMinor / balance.QuantityScaled * Item.QuantityScale / 100m:0.###} ج.م"
+        : recipe is null ? "لا توجد وصفة" : $"{recipe.Components.Sum(x => ingredients.TryGetValue(x.IngredientItemId, out var stock) && stock.QuantityScaled > 0 ? (decimal)stock.InventoryCostMinor * x.QuantityScaled / stock.QuantityScaled : 0m) / 100m:0.00} ج.م";
+}
+public sealed record ProductChoice(Guid Id, string Name) { public override string ToString() => Name; }
+public sealed class RecipeComponentEntry(KitchenProduct ingredient, KitchenIngredientBalance? balance, long quantityScaled)
+{
+    public Guid ItemId => ingredient.Id;
+    public string Name => ingredient.Name;
+    public string QuantityDisplay => $"{(decimal)quantityScaled / ingredient.QuantityScale:0.###} {ingredient.Unit}";
+    public long CostMinor => balance is null || balance.QuantityScaled <= 0 ? 0
+        : checked((long)decimal.Round((decimal)balance.InventoryCostMinor * quantityScaled / balance.QuantityScaled, 0, MidpointRounding.AwayFromZero));
+    public string CostDisplay => $"{CostMinor / 100m:0.00} ج.م";
 }
 public sealed class RecipeRow
 {
@@ -369,6 +619,6 @@ public sealed class CafeItemEntry
 }
 public sealed class KitchenOrderRow
 {
-    public KitchenOrderRow(CustomOrderSnapshot order) { Id = order.Id; OrderNumber = order.OrderNumber; CustomerName = order.CustomerName; DueDisplay = order.DueAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm"); TotalDisplay = $"{order.TotalMinor / 100m:0.00} ج.م"; }
-    public Guid Id { get; } public string OrderNumber { get; } public string CustomerName { get; } public string DueDisplay { get; } public string TotalDisplay { get; }
+    public KitchenOrderRow(CustomOrderSnapshot order) { Id = order.Id; OrderNumber = order.OrderNumber; CustomerName = order.CustomerName; DueDisplay = order.DueAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm"); TotalDisplay = $"{order.TotalMinor / 100m:0.00} ج.م"; StatusDisplay = order.Status.ToString(); }
+    public Guid Id { get; } public string OrderNumber { get; } public string CustomerName { get; } public string DueDisplay { get; } public string TotalDisplay { get; } public string StatusDisplay { get; }
 }

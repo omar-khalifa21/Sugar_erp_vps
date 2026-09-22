@@ -32,9 +32,22 @@ internal static class IncomingSyncApplier
             {
                 var id = row.GetProperty("id").GetGuid();
                 var version = row.GetProperty("version").GetInt32();
+                var sku = row.GetProperty("sku").GetString() ?? throw InvalidPayload();
+                var name = row.GetProperty("nameAr").GetString() ?? throw InvalidPayload();
+                var unit = row.GetProperty("unit").GetString() ?? throw InvalidPayload();
+                var scale = row.GetProperty("quantityScale").GetInt32();
+                var price = row.GetProperty("retailPriceMinor").GetInt64();
+                var active = row.GetProperty("active").GetBoolean();
                 var item = await db.CatalogItems.Include(value => value.StockBalance)
                     .SingleOrDefaultAsync(value => value.Id == id, cancellationToken);
-                if (item is not null && version <= item.Version) continue;
+                // Bootstrap is authoritative for this site's price. Reapply an
+                // equal-version snapshot so a site-price change is not hidden
+                // behind the global catalog version.
+                if (item is not null && version < item.Version) continue;
+                if (item is not null && version == item.Version
+                    && item.Sku == sku && item.NameAr == name && item.Unit == unit
+                    && item.QuantityScale == scale && item.RetailPriceMinor == price
+                    && item.Active == active) continue;
                 if (item is null)
                 {
                     item = new CatalogItem { Id = id };
@@ -50,17 +63,15 @@ internal static class IncomingSyncApplier
                 else
                 {
                     var used = await db.StockMovements.AnyAsync(value => value.ItemId == id, cancellationToken);
-                    var scale = row.GetProperty("quantityScale").GetInt32();
-                    var unit = row.GetProperty("unit").GetString() ?? string.Empty;
                     if (used && (item.QuantityScale != scale || !string.Equals(item.Unit, unit, StringComparison.Ordinal)))
                         throw new CentralApiException("LOCKED_ITEM_PRECISION", "رفض البرنامج تغيير وحدة أو دقة صنف مستخدم في حركات سابقة.", false, 409);
                 }
-                item.Sku = row.GetProperty("sku").GetString() ?? throw InvalidPayload();
-                item.NameAr = row.GetProperty("nameAr").GetString() ?? throw InvalidPayload();
-                item.Unit = row.GetProperty("unit").GetString() ?? throw InvalidPayload();
-                item.QuantityScale = row.GetProperty("quantityScale").GetInt32();
-                item.RetailPriceMinor = row.GetProperty("retailPriceMinor").GetInt64();
-                item.Active = row.GetProperty("active").GetBoolean();
+                item.Sku = sku;
+                item.NameAr = name;
+                item.Unit = unit;
+                item.QuantityScale = scale;
+                item.RetailPriceMinor = price;
+                item.Active = active;
                 item.Version = version;
                 item.UpdatedAtUtc = DateTimeOffset.UtcNow;
                 if (item.QuantityScale < 1 || item.RetailPriceMinor < 0 || item.Version < 1) throw InvalidPayload();
@@ -114,8 +125,11 @@ internal static class IncomingSyncApplier
                     && destination.ValueKind == JsonValueKind.String
                     && Guid.TryParse(destination.GetString(), out var destinationSiteId)
                     && destinationSiteId == configuration.SiteId;
+                var globalCatalogEvent = incoming.EventType is "catalog.item_published" or "catalog.item.updated" or "catalog.item.deleted";
+                var sharedCafeEvent = configuration.Profile == DeviceProfile.BranchType2
+                    && incoming.EventType.StartsWith("cafe_customer.", StringComparison.Ordinal);
                 if (incoming.Id == Guid.Empty
-                    || (incoming.OriginSiteId != configuration.SiteId && !addressedKitchenEvent)
+                    || (incoming.OriginSiteId != configuration.SiteId && !addressedKitchenEvent && !globalCatalogEvent && !sharedCafeEvent)
                     || incoming.DeviceSequence < 1
                     || incoming.SchemaVersion < 1
                     || !long.TryParse(incoming.ServerPosition, out var position)
@@ -142,7 +156,7 @@ internal static class IncomingSyncApplier
                 }
 
                 if (incoming.OriginDeviceId != configuration.DeviceId)
-                    await ApplyBusinessEventAsync(db, incoming, cancellationToken);
+                    await ApplyBusinessEventAsync(db, incoming, configuration, cancellationToken);
                 db.InboxMessages.Add(new InboxMessage
                 {
                     EventId = incoming.Id,
@@ -163,13 +177,17 @@ internal static class IncomingSyncApplier
         }
     }
 
-    private static async Task ApplyBusinessEventAsync(BranchDbContext db, SyncPulledEvent incoming, CancellationToken cancellationToken)
+    private static async Task ApplyBusinessEventAsync(
+        BranchDbContext db,
+        SyncPulledEvent incoming,
+        DeviceConfiguration configuration,
+        CancellationToken cancellationToken)
     {
         switch (incoming.EventType)
         {
             case "catalog.item_published":
             case "catalog.item.updated":
-                await ApplyCatalogItemAsync(db, incoming.Payload, cancellationToken);
+                await ApplyCatalogItemAsync(db, incoming.Payload, configuration, cancellationToken);
                 break;
             case "shipment.dispatched":
                 await ApplyShipmentAsync(db, incoming, cancellationToken);
@@ -190,12 +208,16 @@ internal static class IncomingSyncApplier
                 await ApplyRemoteStockProjectionAsync(db, incoming.Payload, cancellationToken);
                 break;
             case "device.bootstrap":
-                await ApplyBootstrapAsync(db, incoming, cancellationToken);
+                await ApplyBootstrapAsync(db, incoming, configuration, cancellationToken);
                 break;
         }
     }
 
-    private static async Task ApplyCatalogItemAsync(BranchDbContext db, JsonElement payload, CancellationToken cancellationToken)
+    private static async Task ApplyCatalogItemAsync(
+        BranchDbContext db,
+        JsonElement payload,
+        DeviceConfiguration configuration,
+        CancellationToken cancellationToken)
     {
         var id = RequiredGuid(payload, "item_id");
         var sku = RequiredString(payload, "sku");
@@ -205,6 +227,8 @@ internal static class IncomingSyncApplier
         var price = RequiredLong(payload, "retail_price_minor");
         var version = RequiredInt(payload, "version");
         var active = OptionalBoolean(payload, "active", true);
+        var priceSiteId = OptionalGuid(payload, "price_site_id") ?? OptionalGuid(payload, "site_id");
+        var appliesLocalPrice = priceSiteId is null || priceSiteId == configuration.SiteId;
         if (scale < 1 || price < 0 || version < 1) throw InvalidPayload();
         var item = await db.CatalogItems.Include(value => value.StockBalance).SingleOrDefaultAsync(value => value.Id == id, cancellationToken);
         if (item is null)
@@ -216,7 +240,7 @@ internal static class IncomingSyncApplier
                 NameAr = name,
                 Unit = unit,
                 QuantityScale = scale,
-                RetailPriceMinor = price,
+                RetailPriceMinor = appliesLocalPrice ? price : 0,
                 Active = active,
                 Version = version,
                 UpdatedAtUtc = DateTimeOffset.UtcNow
@@ -225,7 +249,16 @@ internal static class IncomingSyncApplier
             db.StockBalances.Add(new StockBalance { ItemId = id, QuantityScaled = 0, Revision = 1, AsOfUtc = DateTimeOffset.UtcNow });
             return;
         }
-        if (version <= item.Version) return;
+        if (version < item.Version) return;
+        if (version == item.Version)
+        {
+            // The server publishes one catalog event per target site. Those
+            // events intentionally share the global item version, so the
+            // event addressed to this branch must still be allowed to update
+            // its independent retail price.
+            if (appliesLocalPrice) item.RetailPriceMinor = price;
+            return;
+        }
         var used = await db.StockMovements.AnyAsync(value => value.ItemId == id, cancellationToken);
         if (used && (item.QuantityScale != scale || !string.Equals(item.Unit, unit, StringComparison.Ordinal)))
             throw new CentralApiException("LOCKED_ITEM_PRECISION", "رفض البرنامج تغيير وحدة أو دقة صنف مستخدم في حركات سابقة.", false, 409);
@@ -233,7 +266,7 @@ internal static class IncomingSyncApplier
         item.NameAr = name;
         item.Unit = unit;
         item.QuantityScale = scale;
-        item.RetailPriceMinor = price;
+        if (appliesLocalPrice) item.RetailPriceMinor = price;
         item.Active = active;
         item.Version = version;
         item.UpdatedAtUtc = DateTimeOffset.UtcNow;
@@ -426,10 +459,14 @@ internal static class IncomingSyncApplier
         projection.AsOfUtc = ParseDate(RequiredString(payload, "as_of"));
     }
 
-    private static async Task ApplyBootstrapAsync(BranchDbContext db, SyncPulledEvent incoming, CancellationToken cancellationToken)
+    private static async Task ApplyBootstrapAsync(
+        BranchDbContext db,
+        SyncPulledEvent incoming,
+        DeviceConfiguration configuration,
+        CancellationToken cancellationToken)
     {
         if (incoming.Payload.TryGetProperty("catalog", out var catalog) && catalog.ValueKind == JsonValueKind.Array)
-            foreach (var item in catalog.EnumerateArray()) await ApplyCatalogItemAsync(db, item, cancellationToken);
+            foreach (var item in catalog.EnumerateArray()) await ApplyCatalogItemAsync(db, item, configuration, cancellationToken);
         if (incoming.Payload.TryGetProperty("shipments", out var shipments) && shipments.ValueKind == JsonValueKind.Array)
         {
             foreach (var shipment in shipments.EnumerateArray())

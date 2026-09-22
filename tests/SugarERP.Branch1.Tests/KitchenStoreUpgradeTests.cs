@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using SugarERP.Application;
 using SugarERP.Infrastructure.Local;
 using SugarERP.Kitchen;
 using Xunit;
@@ -300,6 +301,14 @@ public sealed class KitchenStoreUpgradeTests
                     catalog = Array.Empty<object>(), customers = Array.Empty<object>(), recipes = Array.Empty<object>(), stock = Array.Empty<object>(), as_of = DateTimeOffset.UtcNow });
             if (path.EndsWith("/sync/pull", StringComparison.Ordinal))
             {
+                const string occurredAt = "2026-09-21T10:00:00.000Z";
+                var payload = JsonSerializer.SerializeToElement(new
+                {
+                    request_id = requestId,
+                    branch_name = "Test Branch",
+                    version = 1,
+                    lines = new[] { new { line_id = requestLineId, item_id = Guid.NewGuid(), name_snapshot = "جاتوه", unit_snapshot = "قطعة", quantity_scale = 1, requested_scaled = 5 } }
+                });
                 var incoming = new
                 {
                     id = requestEventId,
@@ -309,17 +318,12 @@ public sealed class KitchenStoreUpgradeTests
                     device_sequence = 1,
                     event_type = "kitchen_request.submitted",
                     schema_version = 1,
-                    occurred_at = "2026-09-21T10:00:00.000Z",
+                    occurred_at = occurredAt,
                     received_at = "2026-09-21T10:00:01.000Z",
-                    payload = new
-                    {
-                        request_id = requestId,
-                        branch_name = "Test Branch",
-                        version = 1,
-                        lines = new[] { new { line_id = requestLineId, item_id = Guid.NewGuid(), name_snapshot = "جاتوه", unit_snapshot = "قطعة", quantity_scale = 1, requested_scaled = 5 } }
-                    },
+                    payload,
                     dependencies = Array.Empty<Guid>(),
-                    content_hash = new string('a', 64),
+                    content_hash = ContractEventFactory.ComputeHash(requestEventId, 1, "kitchen_request.submitted", 1,
+                        occurredAt, payload, []),
                     server_position = "1"
                 };
                 return Ok(new { contract_version = "1.0", compatibility = new { minimum = "1.0", current = "1.0" }, cursor = "test-cursor", has_more = false, events = new[] { incoming } });
