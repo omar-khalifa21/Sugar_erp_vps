@@ -86,6 +86,29 @@ public sealed class KitchenStoreUpgradeTests
     }
 
     [Fact]
+    public async Task Receipts_LoadNewestFirst_WithSqliteDateTimeOffsets()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "SugarERP-Kitchen-tests", Guid.NewGuid().ToString(), "kitchen.db");
+        var store = new KitchenStore(path);
+        await store.InitializeAsync();
+        var older = DateTimeOffset.UtcNow.AddHours(-1);
+        var newer = DateTimeOffset.UtcNow;
+        var olderReceiptId = Guid.NewGuid();
+        var newerReceiptId = Guid.NewGuid();
+        await using (var db = store.Open())
+        {
+            db.Receipts.AddRange(
+                new KitchenReceiptRecord { EventId = Guid.NewGuid(), ReceiptId = olderReceiptId, ShipmentId = Guid.NewGuid(), BranchSiteId = Guid.NewGuid(), Status = "RECEIVED", PayloadJson = "{}", CountedAtUtc = older },
+                new KitchenReceiptRecord { EventId = Guid.NewGuid(), ReceiptId = newerReceiptId, ShipmentId = Guid.NewGuid(), BranchSiteId = Guid.NewGuid(), Status = "RECEIVED", PayloadJson = "{}", CountedAtUtc = newer });
+            await db.SaveChangesAsync();
+        }
+
+        var receipts = await new KitchenSyncService(new HttpClient(new OfflineHandler()), store).GetReceiptsAsync();
+
+        Assert.Equal(new[] { newerReceiptId, olderReceiptId }, receipts.Select(x => x.ReceiptId));
+    }
+
+    [Fact]
     public async Task MultipleOfflineKitchenWritesUseDistinctSequencesAndApplyLocally()
     {
         var path = Path.Combine(Path.GetTempPath(), "SugarERP-Kitchen-tests", Guid.NewGuid().ToString(), "kitchen.db");

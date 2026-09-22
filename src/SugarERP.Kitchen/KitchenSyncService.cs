@@ -258,6 +258,17 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
         return orders.OrderByDescending(x => x.CreatedAtUtc).Select(ToSnapshot).ToArray();
     }
 
+    public async Task<IReadOnlyList<KitchenReceiptRecord>> GetReceiptsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await using var db = store.Open();
+        // SQLite stores DateTimeOffset values as text and EF Core cannot translate
+        // ordering for that CLR type. Materialize first so opening the Kitchen UI
+        // cannot crash as soon as a receipt exists in the local database.
+        var receipts = await db.Receipts.AsNoTracking().ToListAsync(cancellationToken);
+        return receipts.OrderByDescending(x => x.CountedAtUtc).ToArray();
+    }
+
     public async Task HideCafeCustomerAsync(Guid customerId)
     {
         if (customerId == Guid.Empty) throw new BusinessRuleException("CAFE_REQUIRED", "اختر الكافيه أولاً.");

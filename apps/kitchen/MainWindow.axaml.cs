@@ -43,7 +43,7 @@ public sealed partial class MainWindow : Window
         var activeRequests = requests.Where(x => x.Status is not ("FULFILLED" or "SENT" or "REJECTED")).ToArray();
         var shipmentOutbox = (await db.Outbox.AsNoTracking().Where(x => x.UploadJson.Contains("shipment.dispatched")).OrderByDescending(x => x.Sequence).ToListAsync())
             .Select(ParseUpload).Where(x => x is not null).Cast<SyncUploadEvent>().ToArray();
-        var receipts = await db.Receipts.AsNoTracking().OrderByDescending(x => x.CountedAtUtc).ToListAsync();
+        var receipts = await _sync.GetReceiptsAsync();
         var selectedRequestId = (RequestsList.SelectedItem as WaredRow)?.Request.Id;
         _waredRows = requests.Select(request => WaredRow.Create(request,
             shipmentOutbox.FirstOrDefault(x => x.Payload.TryGetProperty("request_id", out var requestId) && requestId.GetGuid() == request.Id), receipts)).ToArray();
