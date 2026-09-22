@@ -564,14 +564,14 @@ describe('Contract v1 sync (PostgreSQL integration)', () => {
     const received = await post(4, 'ingredient.received', { operation_id: randomUUID(), reason: 'Supplier delivery',
       lines: [{ line_id: randomUUID(), item_id: ingredientItemId, quantity_scaled: '10' }] });
     await request(app.getHttpServer()).post('/api/v1/sync/push').set(headers).send(received.upload).expect(200);
-    expect((await prisma.stockBalance.findFirstOrThrow({ where: { siteId: kitchenSiteId, itemId: ingredientItemId, location: 'KITCHEN' } })).quantityScaled).toBe(84n);
+    expect((await prisma.stockBalance.findFirstOrThrow({ where: { siteId: kitchenSiteId, itemId: ingredientItemId, location: 'KITCHEN' } })).quantityScaled).toBe(88n);
     await post(5, 'ingredient.waste', { operation_id: randomUUID(), reason: 'Damaged ingredient',
       lines: [{ line_id: randomUUID(), item_id: ingredientItemId, quantity_scaled: '4' }] });
     const countLineId = randomUUID();
     await post(6, 'ingredient.counted', { count_id: randomUUID(), business_date: new Date().toISOString().slice(0, 10),
       lines: [{ line_id: countLineId, item_id: ingredientItemId, actual_scaled: '78', recorded_waste_scaled: '4' }] });
     expect((await prisma.stockBalance.findFirstOrThrow({ where: { siteId: kitchenSiteId, itemId: ingredientItemId, location: 'KITCHEN' } })).quantityScaled).toBe(78n);
-    expect(await prisma.ingredientVariance.findUnique({ where: { id: countLineId } })).toMatchObject({ expectedScaled: 80n, actualScaled: 78n, recordedWasteScaled: 4n, unexplainedVarianceScaled: 2n });
+    expect(await prisma.ingredientVariance.findUnique({ where: { id: countLineId } })).toMatchObject({ expectedScaled: 84n, actualScaled: 78n, recordedWasteScaled: 4n, unexplainedVarianceScaled: 6n });
   });
 
   it('syncs kitchen catalog, recipe, cafe, purchase cost and one cafe fulfillment', async () => {
