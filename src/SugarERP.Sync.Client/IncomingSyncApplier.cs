@@ -28,9 +28,15 @@ internal static class IncomingSyncApplier
             await using var db = database.CreateContext();
             await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
             var changed = 0;
+            var serverProductIds = new HashSet<Guid>();
             foreach (var row in catalog.EnumerateArray())
             {
+                if (row.TryGetProperty("kind", out var itemKind)
+                    && itemKind.ValueKind == JsonValueKind.String
+                    && !string.Equals(itemKind.GetString(), "PRODUCT", StringComparison.Ordinal))
+                    continue;
                 var id = row.GetProperty("id").GetGuid();
+                serverProductIds.Add(id);
                 var version = row.GetProperty("version").GetInt32();
                 var sku = row.GetProperty("sku").GetString() ?? throw InvalidPayload();
                 var name = row.GetProperty("nameAr").GetString() ?? throw InvalidPayload();
@@ -77,6 +83,24 @@ internal static class IncomingSyncApplier
                 if (item.QuantityScale < 1 || item.RetailPriceMinor < 0 || item.Version < 1) throw InvalidPayload();
                 changed += 1;
             }
+            var pendingCatalogIds = await db.OutboxMessages
+                .Where(value => value.State != OutboxState.Acknowledged
+                    && value.EventType.StartsWith("catalog.item."))
+                .Select(value => value.AggregateId)
+                .ToListAsync(cancellationToken);
+            // The branch bootstrap is an authoritative PRODUCT snapshot. Retire
+            // stale rows (including ingredients received by older clients) but
+            // preserve locally-created products whose durable event is unsent.
+            foreach (var stale in await db.CatalogItems
+                .Where(value => value.Active && !serverProductIds.Contains(value.Id) && !pendingCatalogIds.Contains(value.Id))
+                .ToListAsync(cancellationToken))
+            {
+                stale.Active = false;
+                stale.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                changed += 1;
+            }
+            if (bootstrap.TryGetProperty("customers", out var customers) && customers.ValueKind == JsonValueKind.Array)
+                changed += await ApplyCafeBootstrapAsync(db, customers, cancellationToken);
             await db.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
             return changed;
@@ -126,8 +150,7 @@ internal static class IncomingSyncApplier
                     && Guid.TryParse(destination.GetString(), out var destinationSiteId)
                     && destinationSiteId == configuration.SiteId;
                 var globalCatalogEvent = incoming.EventType is "catalog.item_published" or "catalog.item.updated" or "catalog.item.deleted";
-                var sharedCafeEvent = configuration.Profile == DeviceProfile.BranchType2
-                    && incoming.EventType.StartsWith("cafe_customer.", StringComparison.Ordinal);
+                var sharedCafeEvent = incoming.EventType.StartsWith("cafe_customer.", StringComparison.Ordinal);
                 if (incoming.Id == Guid.Empty
                     || (incoming.OriginSiteId != configuration.SiteId && !addressedKitchenEvent && !globalCatalogEvent && !sharedCafeEvent)
                     || incoming.DeviceSequence < 1
@@ -189,6 +212,14 @@ internal static class IncomingSyncApplier
             case "catalog.item.updated":
                 await ApplyCatalogItemAsync(db, incoming.Payload, configuration, cancellationToken);
                 break;
+            case "cafe_customer.created":
+            case "cafe_customer.updated":
+            case "cafe_customer.price_list_updated":
+                await ApplyCafeCustomerEventAsync(db, incoming.Payload, cancellationToken);
+                break;
+            case "cafe_customer.archived":
+                await ArchiveCafeCustomerEventAsync(db, incoming.Payload, cancellationToken);
+                break;
             case "shipment.dispatched":
                 await ApplyShipmentAsync(db, incoming, cancellationToken);
                 break;
@@ -196,7 +227,7 @@ internal static class IncomingSyncApplier
             case "kitchen_request.approved":
             case "kitchen_request.rejected":
             case "kitchen_request.received":
-                await ApplyRequestUpdateAsync(db, incoming.Payload, cancellationToken);
+                await ApplyRequestUpdateAsync(db, incoming.EventType, incoming.Payload, cancellationToken);
                 break;
             case "quantity_conflict.decided":
                 await ApplyConflictDecisionAsync(db, incoming, cancellationToken);
@@ -213,6 +244,158 @@ internal static class IncomingSyncApplier
         }
     }
 
+    private static async Task<int> ApplyCafeBootstrapAsync(
+        BranchDbContext db,
+        JsonElement customers,
+        CancellationToken cancellationToken)
+    {
+        var changed = 0;
+        var serverIds = new HashSet<Guid>();
+        foreach (var row in customers.EnumerateArray())
+        {
+            var id = row.GetProperty("id").GetGuid();
+            serverIds.Add(id);
+            if (await db.OutboxMessages.AnyAsync(value => value.AggregateId == id
+                && value.State != OutboxState.Acknowledged
+                && value.EventType.StartsWith("cafe_customer."), cancellationToken)) continue;
+
+            var phone = row.TryGetProperty("contact", out var contact) && contact.ValueKind == JsonValueKind.String
+                ? contact.GetString()?.Trim() ?? ""
+                : "";
+            if (!await PrepareCafePhoneAsync(db, id, phone, cancellationToken)) continue;
+
+            var customer = await db.CafeCustomers.Include(value => value.Prices)
+                .SingleOrDefaultAsync(value => value.Id == id, cancellationToken);
+            if (customer is null)
+            {
+                customer = new CafeCustomer { Id = id, CommandId = Guid.NewGuid(), CreatedAtUtc = DateTimeOffset.UtcNow };
+                db.CafeCustomers.Add(customer);
+            }
+            customer.Name = row.GetProperty("name").GetString() ?? throw InvalidPayload();
+            customer.Kind = "كافيه";
+            customer.Phone = phone;
+            customer.Address = row.TryGetProperty("notes", out var notes) && notes.ValueKind == JsonValueKind.String ? notes.GetString() ?? "" : "";
+            customer.Active = row.TryGetProperty("active", out var active) ? active.GetBoolean() : true;
+            customer.Version = row.TryGetProperty("version", out var version) ? version.GetInt32() : 1;
+            customer.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            if (row.TryGetProperty("prices", out var prices) && prices.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var priceRow in prices.EnumerateArray())
+                {
+                    var itemId = priceRow.GetProperty("itemId").GetGuid();
+                    if (!await db.CatalogItems.AnyAsync(value => value.Id == itemId && value.Active, cancellationToken)
+                        && !db.CatalogItems.Local.Any(value => value.Id == itemId && value.Active)) continue;
+                    var price = customer.Prices.SingleOrDefault(value => value.ItemId == itemId);
+                    if (price is null)
+                    {
+                        price = new CafePrice { Id = Guid.NewGuid(), CafeCustomerId = id, ItemId = itemId };
+                        customer.Prices.Add(price);
+                    }
+                    price.UnitPriceMinor = priceRow.GetProperty("priceMinor").GetInt64();
+                    price.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                }
+            }
+            changed += 1;
+        }
+
+        var pendingIds = await db.OutboxMessages
+            .Where(value => value.State != OutboxState.Acknowledged && value.EventType.StartsWith("cafe_customer."))
+            .Select(value => value.AggregateId)
+            .ToListAsync(cancellationToken);
+        foreach (var missing in await db.CafeCustomers
+            .Where(value => value.Active && !serverIds.Contains(value.Id) && !pendingIds.Contains(value.Id))
+            .ToListAsync(cancellationToken))
+        {
+            missing.Active = false;
+            changed += 1;
+        }
+        return changed;
+    }
+
+    private static async Task ApplyCafeCustomerEventAsync(BranchDbContext db, JsonElement payload, CancellationToken cancellationToken)
+    {
+        var id = RequiredGuid(payload, "customer_id");
+        if (await db.OutboxMessages.AnyAsync(value => value.AggregateId == id
+            && value.State != OutboxState.Acknowledged
+            && value.EventType.StartsWith("cafe_customer."), cancellationToken)) return;
+        var incomingPhone = payload.TryGetProperty("phone", out var phoneValue) && phoneValue.ValueKind == JsonValueKind.String
+            ? phoneValue.GetString()?.Trim() ?? ""
+            : null;
+        if (incomingPhone is not null && !await PrepareCafePhoneAsync(db, id, incomingPhone, cancellationToken)) return;
+        var customer = await db.CafeCustomers.Include(value => value.Prices).SingleOrDefaultAsync(value => value.Id == id, cancellationToken);
+        if (customer is null)
+        {
+            customer = new CafeCustomer { Id = id, CommandId = Guid.NewGuid(), CreatedAtUtc = DateTimeOffset.UtcNow };
+            db.CafeCustomers.Add(customer);
+        }
+        if (payload.TryGetProperty("name", out var name) && name.ValueKind == JsonValueKind.String) customer.Name = name.GetString() ?? customer.Name;
+        if (payload.TryGetProperty("kind", out var kind) && kind.ValueKind == JsonValueKind.String) customer.Kind = kind.GetString() ?? "كافيه";
+        if (string.IsNullOrWhiteSpace(customer.Kind)) customer.Kind = "كافيه";
+        if (incomingPhone is not null) customer.Phone = incomingPhone;
+        if (payload.TryGetProperty("address", out var address) && address.ValueKind == JsonValueKind.String) customer.Address = address.GetString() ?? "";
+        if (payload.TryGetProperty("version", out var version) && version.TryGetInt32(out var parsedVersion)) customer.Version = parsedVersion;
+        customer.Active = true;
+        customer.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        if (payload.TryGetProperty("prices", out var prices) && prices.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var row in prices.EnumerateArray())
+            {
+                var itemId = RequiredGuid(row, "item_id");
+                if (!await db.CatalogItems.AnyAsync(value => value.Id == itemId && value.Active, cancellationToken)
+                    && !db.CatalogItems.Local.Any(value => value.Id == itemId && value.Active)) continue;
+                var price = customer.Prices.SingleOrDefault(value => value.ItemId == itemId);
+                if (price is null)
+                {
+                    price = new CafePrice { Id = Guid.NewGuid(), CafeCustomerId = id, ItemId = itemId };
+                    customer.Prices.Add(price);
+                }
+                price.UnitPriceMinor = RequiredLong(row, "unit_price_minor");
+                price.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            }
+        }
+    }
+
+    private static async Task<bool> PrepareCafePhoneAsync(
+        BranchDbContext db,
+        Guid incomingCustomerId,
+        string phone,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(phone)) return true;
+        var conflict = await db.CafeCustomers.SingleOrDefaultAsync(
+            value => value.Id != incomingCustomerId && value.Phone == phone,
+            cancellationToken);
+        if (conflict is null) return true;
+
+        var hasPendingLocalChange = await db.OutboxMessages.AnyAsync(value =>
+            value.AggregateId == conflict.Id
+            && value.State != OutboxState.Acknowledged
+            && value.EventType.StartsWith("cafe_customer."), cancellationToken);
+        if (hasPendingLocalChange) return false;
+
+        // Older installations could contain locally-created customer IDs that
+        // predate the shared server master. Keep those rows for order/history
+        // references, but retire their unique phone so the authoritative server
+        // customer (and its stable UUID) can be materialized locally.
+        conflict.Active = false;
+        conflict.Phone = $"legacy-{conflict.Id:N}";
+        conflict.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(cancellationToken);
+        return true;
+    }
+
+    private static async Task ArchiveCafeCustomerEventAsync(BranchDbContext db, JsonElement payload, CancellationToken cancellationToken)
+    {
+        var id = RequiredGuid(payload, "customer_id");
+        var customer = await db.CafeCustomers.SingleOrDefaultAsync(value => value.Id == id, cancellationToken);
+        if (customer is not null)
+        {
+            customer.Active = false;
+            if (payload.TryGetProperty("version", out var version) && version.TryGetInt32(out var parsedVersion)) customer.Version = parsedVersion;
+            customer.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        }
+    }
+
     private static async Task ApplyCatalogItemAsync(
         BranchDbContext db,
         JsonElement payload,
@@ -220,6 +403,21 @@ internal static class IncomingSyncApplier
         CancellationToken cancellationToken)
     {
         var id = RequiredGuid(payload, "item_id");
+        if (payload.TryGetProperty("kind", out var itemKind)
+            && itemKind.ValueKind == JsonValueKind.String
+            && !string.Equals(itemKind.GetString(), "PRODUCT", StringComparison.Ordinal))
+        {
+            var stale = await db.CatalogItems.SingleOrDefaultAsync(value => value.Id == id, cancellationToken);
+            if (stale is not null
+                && !await db.OutboxMessages.AnyAsync(value => value.AggregateId == id
+                    && value.State != OutboxState.Acknowledged
+                    && value.EventType.StartsWith("catalog.item."), cancellationToken))
+            {
+                stale.Active = false;
+                stale.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            }
+            return;
+        }
         var sku = RequiredString(payload, "sku");
         var name = RequiredString(payload, "name_ar");
         var unit = RequiredString(payload, "unit");
@@ -338,14 +536,23 @@ internal static class IncomingSyncApplier
         }
     }
 
-    private static async Task ApplyRequestUpdateAsync(BranchDbContext db, JsonElement payload, CancellationToken cancellationToken)
+    private static async Task ApplyRequestUpdateAsync(BranchDbContext db, string eventType, JsonElement payload, CancellationToken cancellationToken)
     {
         var requestId = RequiredGuid(payload, "request_id");
-        var version = RequiredInt(payload, "version");
         var request = await db.KitchenRequests.Include(value => value.Lines).SingleOrDefaultAsync(value => value.Id == requestId, cancellationToken);
-        if (request is null) throw new CentralApiException("DEPENDENCY_NOT_READY", "وصل تحديث لطلب وارد غير موجود محلياً.", true, 409);
+        // A replacement device can legitimately receive acknowledgements for
+        // requests created by the branch's retired device. They belong in the
+        // audit feed but cannot be projected without the original local row;
+        // do not let them block newer catalog/customer synchronization.
+        if (request is null) return;
+        var version = payload.TryGetProperty("version", out var versionValue) && versionValue.TryGetInt32(out var parsedVersion)
+            ? parsedVersion
+            : checked(request.Version + 1);
         if (version <= request.Version) return;
-        request.Status = RequiredString(payload, "status") switch
+        var status = payload.TryGetProperty("status", out var statusValue) && statusValue.ValueKind == JsonValueKind.String
+            ? statusValue.GetString() ?? ""
+            : eventType == "kitchen_request.received" ? "RECEIVED" : throw InvalidPayload();
+        request.Status = status switch
         {
             "RECEIVED" => KitchenRequestStatus.Received,
             "APPROVED" => KitchenRequestStatus.Approved,

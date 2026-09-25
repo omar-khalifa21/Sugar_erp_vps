@@ -12,6 +12,50 @@ namespace SugarERP.Branch1.Tests;
 public sealed class KitchenStoreUpgradeTests
 {
     [Fact]
+    public async Task PermanentDelete_RemovesOnlyNeverSyncedUnusedItemAndRepairsSequence()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "SugarERP-Kitchen-tests", Guid.NewGuid().ToString(), "kitchen.db");
+        var store = new KitchenStore(path); await store.InitializeAsync();
+        await using (var db = store.Open())
+        {
+            db.Configuration.Add(new KitchenConfiguration { SiteId = Guid.NewGuid(), DeviceId = Guid.NewGuid(), NextDeviceSequence = 1 });
+            await db.SaveChangesAsync();
+        }
+        var service = new KitchenSyncService(new HttpClient(new OfflineHandler()), store);
+        var created = await service.SaveCatalogItemAsync(null, null, "Unsynced Cake", "قطعة", 1, "PRODUCT", 10_000);
+
+        await service.PermanentlyDeleteUnsyncedCatalogItemAsync(created.Id);
+
+        await using var verify = store.Open();
+        Assert.False(await verify.Products.AnyAsync(x => x.Id == created.Id));
+        Assert.False(await verify.Outbox.AnyAsync(x => x.RequestId == created.Id));
+        Assert.Equal(1, (await verify.Configuration.SingleAsync()).NextDeviceSequence);
+    }
+
+    [Fact]
+    public async Task PermanentDelete_BlocksHistoricallyReferencedItemWithoutChangingData()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "SugarERP-Kitchen-tests", Guid.NewGuid().ToString(), "kitchen.db");
+        var store = new KitchenStore(path); await store.InitializeAsync();
+        var productId = Guid.NewGuid();
+        await using (var db = store.Open())
+        {
+            db.Configuration.Add(new KitchenConfiguration { SiteId = Guid.NewGuid(), DeviceId = Guid.NewGuid(), NextDeviceSequence = 2 });
+            db.Products.Add(new KitchenProduct { Id = productId, Name = "Historical Cake", Unit = "قطعة", QuantityScale = 1, Version = 1 });
+            db.Recipes.Add(new KitchenRecipeRecord { ProductItemId = productId, OutputScaled = 1, Version = 1 });
+            await db.SaveChangesAsync();
+        }
+
+        var service = new KitchenSyncService(new HttpClient(new OfflineHandler()), store);
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => service.PermanentlyDeleteUnsyncedCatalogItemAsync(productId));
+
+        Assert.Contains("مستخدم", error.Message);
+        await using var verify = store.Open();
+        Assert.True(await verify.Products.AnyAsync(x => x.Id == productId));
+        Assert.True(await verify.Recipes.AnyAsync(x => x.ProductItemId == productId));
+    }
+
+    [Fact]
     public async Task AdditiveUpgradePreservesEnrollmentAndReceiptHistoryAcrossRestart()
     {
         var path = Path.Combine(Path.GetTempPath(), "SugarERP-Kitchen-tests", Guid.NewGuid().ToString(), "kitchen.db");
@@ -41,7 +85,7 @@ public sealed class KitchenStoreUpgradeTests
     }
 
     [Fact]
-    public async Task HideCafeCustomer_PersistsAndKeepsHistoricalOrders()
+    public async Task ArchiveCafeCustomer_QueuesDurableEventAndKeepsHistoricalOrders()
     {
         var path = Path.Combine(Path.GetTempPath(), "SugarERP-Kitchen-tests", Guid.NewGuid().ToString(), "kitchen.db");
         var store = new KitchenStore(path);
@@ -49,20 +93,92 @@ public sealed class KitchenStoreUpgradeTests
         var customerId = Guid.NewGuid();
         await using (var db = store.Open())
         {
-            db.CafeCustomers.Add(new KitchenCafeCustomer { Id = customerId, Name = "كافيه قديم" });
+            db.Configuration.Add(new KitchenConfiguration { SiteId = Guid.NewGuid(), DeviceId = Guid.NewGuid(), NextDeviceSequence = 8 });
+            db.CafeCustomers.Add(new KitchenCafeCustomer { Id = customerId, Name = "كافيه قديم", Version = 3 });
             db.CustomOrders.Add(new KitchenCustomOrder { Id = Guid.NewGuid(), CustomerId = customerId, CustomerName = "كافيه قديم", OrderNumber = "K-CF-HISTORY", CreatedAtUtc = DateTimeOffset.UtcNow, UpdatedAtUtc = DateTimeOffset.UtcNow, DueAtUtc = DateTimeOffset.UtcNow.AddDays(1) });
             await db.SaveChangesAsync();
         }
 
         var service = new KitchenSyncService(new HttpClient(new OfflineHandler()), store);
-        await service.HideCafeCustomerAsync(customerId);
+        await service.ArchiveCafeCustomerAsync(customerId);
         await new KitchenStore(path).InitializeAsync();
 
         await using var verify = store.Open();
         var customer = await verify.CafeCustomers.SingleAsync(x => x.Id == customerId);
         Assert.True(customer.HiddenLocally);
         Assert.False(customer.Active);
+        Assert.Equal(4, customer.Version);
+        var queued = await verify.Outbox.SingleAsync();
+        Assert.Equal(8, queued.Sequence);
+        Assert.True(queued.AppliedLocally);
+        Assert.Contains("cafe_customer.archived", queued.UploadJson);
+        Assert.Equal(9, (await verify.Configuration.SingleAsync()).NextDeviceSequence);
         Assert.Equal("K-CF-HISTORY", (await service.GetCustomOrdersAsync()).Single().OrderNumber);
+    }
+
+    [Fact]
+    public async Task ResetConnection_PreservesBusinessDataAndRemovesOnlyDeviceIdentity()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "SugarERP-Kitchen-tests", Guid.NewGuid().ToString(), "kitchen.db");
+        var store = new KitchenStore(path); await store.InitializeAsync();
+        var productId = Guid.NewGuid();
+        await using (var db = store.Open())
+        {
+            db.Configuration.Add(new KitchenConfiguration { ApiBaseUrl = "https://ascendyz.xyz/api/v1", SiteId = Guid.NewGuid(),
+                DeviceId = Guid.NewGuid(), ProtectedCredential = DeviceCredentialProtector.Protect("old-secret"), StreamEpoch = 3,
+                NextDeviceSequence = 17, Cursor = "old-cursor", PrinterName = "Kitchen Printer" });
+            db.Products.Add(new KitchenProduct { Id = productId, Name = "Historical Cake", Active = true });
+            db.Outbox.Add(new KitchenOutbox { EventId = Guid.NewGuid(), RequestId = Guid.NewGuid(), Sequence = 1,
+                UploadJson = "{}", Acknowledged = true, AppliedLocally = true, NextAttemptAtUtc = DateTimeOffset.UtcNow });
+            await db.SaveChangesAsync();
+        }
+
+        await new KitchenSyncService(new HttpClient(new OfflineHandler()), store).ResetConnectionAsync();
+
+        await using var verify = store.Open();
+        var configuration = await verify.Configuration.SingleAsync();
+        Assert.Equal(Guid.Empty, configuration.DeviceId);
+        Assert.Equal(Guid.Empty, configuration.SiteId);
+        Assert.Equal(string.Empty, configuration.ProtectedCredential);
+        Assert.Null(configuration.Cursor);
+        Assert.Equal(1, configuration.NextDeviceSequence);
+        Assert.Equal("Kitchen Printer", configuration.PrinterName);
+        Assert.Equal(productId, (await verify.Products.SingleAsync()).Id);
+        verify.ChangeTracker.Clear();
+        var newSiteId = Guid.NewGuid(); var newDeviceId = Guid.NewGuid();
+        var reconnectedService = new KitchenSyncService(new HttpClient(new KitchenEnrollmentHandler(newSiteId, newDeviceId)), store);
+        await reconnectedService.EnrollAsync(new Uri("https://ascendyz.xyz/api/v1"), "new-one-time-key", "Kitchen PC");
+        await reconnectedService.SaveCafeAsync(null, null, "Reconnect Cafe", "");
+        Assert.Equal(2, await verify.Outbox.CountAsync());
+        Assert.Equal(2, await verify.Outbox.CountAsync(x => x.Sequence == 1));
+        verify.ChangeTracker.Clear();
+        var enrolled = await verify.Configuration.SingleAsync();
+        Assert.Equal(newSiteId, enrolled.SiteId);
+        Assert.Equal(newDeviceId, enrolled.DeviceId);
+        Assert.Equal("Kitchen Printer", enrolled.PrinterName);
+    }
+
+    [Fact]
+    public async Task ResetConnection_IsBlockedWhileUnsyncedOperationsExist()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "SugarERP-Kitchen-tests", Guid.NewGuid().ToString(), "kitchen.db");
+        var store = new KitchenStore(path); await store.InitializeAsync();
+        var deviceId = Guid.NewGuid();
+        await using (var db = store.Open())
+        {
+            db.Configuration.Add(new KitchenConfiguration { SiteId = Guid.NewGuid(), DeviceId = deviceId, ProtectedCredential = "protected" });
+            db.Outbox.Add(new KitchenOutbox { EventId = Guid.NewGuid(), RequestId = Guid.NewGuid(), Sequence = 1,
+                UploadJson = "{}", AppliedLocally = true, NextAttemptAtUtc = DateTimeOffset.UtcNow });
+            await db.SaveChangesAsync();
+        }
+
+        var error = await Assert.ThrowsAsync<BusinessRuleException>(() =>
+            new KitchenSyncService(new HttpClient(new OfflineHandler()), store).ResetConnectionAsync());
+
+        Assert.Equal("PENDING_SYNC_EXISTS", error.Code);
+        await using var verify = store.Open();
+        Assert.Equal(deviceId, (await verify.Configuration.SingleAsync()).DeviceId);
+        Assert.Single(await verify.Outbox.ToListAsync());
     }
 
     [Fact]
@@ -171,6 +287,39 @@ public sealed class KitchenStoreUpgradeTests
     }
 
     [Fact]
+    public async Task TemporaryPushFailureRecoversWithoutDuplicateLocalWrite()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "SugarERP-Kitchen-tests", Guid.NewGuid().ToString(), "kitchen.db");
+        var store = new KitchenStore(path); await store.InitializeAsync();
+        var ingredientId = Guid.NewGuid();
+        await using (var db = store.Open())
+        {
+            db.Configuration.Add(new KitchenConfiguration { ApiBaseUrl = "https://sync.test/api/v1", SiteId = Guid.NewGuid(),
+                DeviceId = Guid.NewGuid(), ProtectedCredential = DeviceCredentialProtector.Protect("device-secret"), StreamEpoch = 1 });
+            db.Ingredients.Add(new KitchenIngredientBalance { ItemId = ingredientId, Name = "سكر", Unit = "g",
+                QuantityScale = 1, Active = true, QuantityScaled = 0 });
+            await db.SaveChangesAsync();
+        }
+        var handler = new FlakyKitchenHandler();
+        var service = new KitchenSyncService(new HttpClient(handler), store);
+        await service.ReceiveIngredientsAsync(new Dictionary<Guid, long> { [ingredientId] = 1_000 }, "temporary outage test");
+
+        Assert.Equal(1, await service.PullAsync()); // authoritative bootstrap refresh completed
+        await using (var afterFailure = store.Open())
+        {
+            Assert.False((await afterFailure.Outbox.SingleAsync()).Acknowledged);
+            Assert.Equal(1_000, (await afterFailure.Ingredients.SingleAsync()).QuantityScaled);
+        }
+
+        Assert.Equal(0, await service.PullAsync(forceRetry: true));
+        await using var afterRecovery = store.Open();
+        Assert.True((await afterRecovery.Outbox.SingleAsync()).Acknowledged);
+        Assert.Equal(1_000, (await afterRecovery.Ingredients.SingleAsync()).QuantityScaled);
+        Assert.Single(await afterRecovery.IngredientMovements.Where(x => x.Kind == "RECEIPT").ToListAsync());
+        Assert.Equal(2, handler.PushAttempts);
+    }
+
+    [Fact]
     public async Task UpgradeAdvancesSequencePastExistingPendingRows()
     {
         var path = Path.Combine(Path.GetTempPath(), "SugarERP-Kitchen-tests", Guid.NewGuid().ToString(), "kitchen.db");
@@ -184,6 +333,37 @@ public sealed class KitchenStoreUpgradeTests
         await new KitchenStore(path).InitializeAsync();
         await using var read = store.Open();
         Assert.Equal(8, (await read.Configuration.SingleAsync()).NextDeviceSequence);
+    }
+
+    [Fact]
+    public async Task UpgradeSeparatesLegacyIngredientFromSellableProductsWithoutChangingStock()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "SugarERP-Kitchen-tests", Guid.NewGuid().ToString(), "kitchen.db");
+        var store = new KitchenStore(path); await store.InitializeAsync();
+        var ingredientId = Guid.NewGuid();
+        await using (var db = store.Open())
+        {
+            db.Products.Add(new KitchenProduct { Id = ingredientId, Sku = "FLOUR-1", Name = "Flour", Unit = "g",
+                Kind = "INGREDIENT", QuantityScale = 1000, Active = true, Version = 7, UpdatedAtUtc = DateTimeOffset.UtcNow });
+            db.Ingredients.Add(new KitchenIngredientBalance { ItemId = ingredientId, Name = "old", Unit = "g",
+                QuantityScale = 1, QuantityScaled = 25_000, InventoryCostMinor = 90_000, Version = 1 });
+            await db.SaveChangesAsync();
+            // Simulate a pre-overhaul database whose schema existed before the
+            // product/ingredient separation migration was recorded.
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM kitchen_schema_migrations WHERE Version = 2026092303");
+        }
+
+        await new KitchenStore(path).InitializeAsync();
+
+        await using var verify = store.Open();
+        var ingredient = await verify.Ingredients.SingleAsync();
+        Assert.Equal("FLOUR-1", ingredient.Sku);
+        Assert.Equal("Flour", ingredient.Name);
+        Assert.Equal(1000, ingredient.QuantityScale);
+        Assert.Equal(25_000, ingredient.QuantityScaled);
+        Assert.Equal(90_000, ingredient.InventoryCostMinor);
+        Assert.Equal(7, ingredient.Version);
+        Assert.False((await verify.Products.SingleAsync()).Active);
     }
 
     [Fact]
@@ -260,7 +440,7 @@ public sealed class KitchenStoreUpgradeTests
         var handler = new KitchenFlowHandler(branchSiteId, branchDeviceId, requestId, requestLineId, requestEventId);
         var service = new KitchenSyncService(new HttpClient(handler), store);
 
-        Assert.Equal(1, await service.PullAsync());
+        Assert.Equal(2, await service.PullAsync()); // bootstrap refresh plus the branch request
 
         await using var verify = store.Open();
         var saved = await verify.Requests.Include(value => value.Lines).SingleAsync();
@@ -277,10 +457,116 @@ public sealed class KitchenStoreUpgradeTests
         Assert.Equal(branchSiteId, pushed.GetProperty("payload").GetProperty("destination_site_id").GetGuid());
     }
 
+    [Fact]
+    public async Task PullAppliesRecipeAndCafeEventsByCanonicalIds()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "SugarERP-Kitchen-tests", Guid.NewGuid().ToString(), "kitchen.db");
+        var store = new KitchenStore(path); await store.InitializeAsync();
+        var siteId = Guid.NewGuid(); var deviceId = Guid.NewGuid();
+        var productId = Guid.NewGuid(); var ingredientId = Guid.NewGuid(); var customerId = Guid.NewGuid();
+        await using (var db = store.Open())
+        {
+            db.Configuration.Add(new KitchenConfiguration { ApiBaseUrl = "https://sync.test/api/v1", SiteId = siteId,
+                DeviceId = deviceId, ProtectedCredential = DeviceCredentialProtector.Protect("device-secret"), StreamEpoch = 1 });
+            await db.SaveChangesAsync();
+        }
+        var service = new KitchenSyncService(new HttpClient(new KitchenReferenceDataHandler(siteId, productId, ingredientId, customerId)), store);
+
+        Assert.Equal(4, await service.PullAsync()); // bootstrap refresh plus three authoritative events
+
+        await using var verify = store.Open();
+        var recipe = await verify.Recipes.Include(x => x.Components).SingleAsync();
+        Assert.Equal(productId, recipe.ProductItemId);
+        Assert.Equal(ingredientId, recipe.Components.Single().IngredientItemId);
+        Assert.Equal(200, recipe.Components.Single().QuantityScaled);
+        var customer = await verify.CafeCustomers.Include(x => x.Prices).SingleAsync();
+        Assert.Equal(customerId, customer.Id);
+        Assert.False(customer.Active);
+        Assert.True(customer.HiddenLocally);
+        Assert.Equal(2, customer.Version);
+        Assert.Equal(productId, customer.Prices.Single().ItemId);
+    }
+
     private sealed class OfflineHandler : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
             throw new HttpRequestException("offline");
+    }
+
+    private sealed class KitchenEnrollmentHandler(Guid siteId, Guid deviceId) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(request.RequestUri!.AbsolutePath.EndsWith("/enrollment", StringComparison.Ordinal)
+                ? new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(new
+                {
+                    device = new { id = deviceId, siteId, profile = "KITCHEN", streamEpoch = 1 },
+                    credential = "new-device-secret", contractVersion = "1.0"
+                }) }
+                : new HttpResponseMessage(HttpStatusCode.NotFound));
+    }
+
+    private sealed class KitchenReferenceDataHandler(Guid siteId, Guid productId, Guid ingredientId, Guid customerId) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            if (path.EndsWith("/sync/bootstrap", StringComparison.Ordinal))
+                return Task.FromResult(Ok(new { contract_version = "1.0", site = new { id = siteId, name = "Test Kitchen", type = "KITCHEN", timezone = "Africa/Cairo" },
+                    catalog = new object[] {
+                        new { id = productId, sku = "P-1", nameAr = "Cake", unit = "piece", quantityScale = 1, retailPriceMinor = 1000, kind = "PRODUCT", active = true, version = 1 },
+                        new { id = ingredientId, sku = "I-1", nameAr = "Flour", unit = "g", quantityScale = 1, retailPriceMinor = 0, kind = "INGREDIENT", active = true, version = 1 }
+                    }, customers = Array.Empty<object>(), recipes = Array.Empty<object>(), stock = Array.Empty<object>(), as_of = DateTimeOffset.UtcNow }));
+            if (path.EndsWith("/sync/pull", StringComparison.Ordinal))
+            {
+                var recipe = JsonSerializer.SerializeToElement(new { product_item_id = productId, output_scaled = "1", version = 1,
+                    components = new[] { new { ingredient_item_id = ingredientId, quantity_scaled = "200" } } });
+                var created = JsonSerializer.SerializeToElement(new { customer_id = customerId, site_id = siteId, name = "Test Cafe", phone = "", notes = "", version = 1,
+                    prices = new[] { new { item_id = productId, unit_price_minor = 1000 } } });
+                var archived = JsonSerializer.SerializeToElement(new { customer_id = customerId, site_id = siteId, version = 2 });
+                var events = new[] { Incoming("recipe.updated", recipe, 1), Incoming("cafe_customer.created", created, 2), Incoming("cafe_customer.archived", archived, 3) };
+                return Task.FromResult(Ok(new { contract_version = "1.0", compatibility = new { minimum = "1.0", current = "1.0" }, cursor = "reference-cursor", has_more = false, events }));
+            }
+            if (path.EndsWith("/sync/ack", StringComparison.Ordinal))
+                return Task.FromResult(Ok(new { acknowledged = true, server_position = "3" }));
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+        }
+
+        private JsonElement Incoming(string eventType, JsonElement payload, int position)
+        {
+            var eventId = Guid.NewGuid(); const string occurredAt = "2026-09-23T10:00:00.000Z";
+            return JsonSerializer.SerializeToElement(new { id = eventId, origin_device_id = Guid.NewGuid(), origin_site_id = siteId,
+                stream_epoch = 1, device_sequence = position, event_type = eventType, schema_version = 1, occurred_at = occurredAt,
+                received_at = "2026-09-23T10:00:01.000Z", payload, dependencies = Array.Empty<Guid>(),
+                content_hash = ContractEventFactory.ComputeHash(eventId, position, eventType, 1, occurredAt, payload, []), server_position = position.ToString() });
+        }
+
+        private static HttpResponseMessage Ok<T>(T body) => new(HttpStatusCode.OK) { Content = JsonContent.Create(body) };
+    }
+
+    private sealed class FlakyKitchenHandler : HttpMessageHandler
+    {
+        public int PushAttempts { get; private set; }
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            if (path.EndsWith("/sync/push", StringComparison.Ordinal))
+            {
+                PushAttempts++;
+                if (PushAttempts == 1) throw new HttpRequestException("temporary network loss");
+                using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
+                var eventId = body.RootElement.GetProperty("events")[0].GetProperty("id").GetGuid();
+                return Ok(new { contract_version = "1.0", next_expected_sequence = 2,
+                    results = new[] { new { id = eventId, status = "accepted", server_position = "1", code = (string?)null, error_code = (string?)null, retryable = (bool?)null } } });
+            }
+            if (path.EndsWith("/sync/bootstrap", StringComparison.Ordinal))
+                return Ok(new { contract_version = "1.0", site = new { id = Guid.NewGuid(), name = "Test Kitchen", type = "KITCHEN", timezone = "Africa/Cairo" },
+                    catalog = Array.Empty<object>(), customers = Array.Empty<object>(), recipes = Array.Empty<object>(), stock = Array.Empty<object>(), as_of = DateTimeOffset.UtcNow });
+            if (path.EndsWith("/sync/pull", StringComparison.Ordinal))
+                return Ok(new { contract_version = "1.0", compatibility = new { minimum = "1.0", current = "1.0" }, cursor = "reconnect-cursor", has_more = false, events = Array.Empty<object>() });
+            if (path.EndsWith("/sync/ack", StringComparison.Ordinal)) return Ok(new { acknowledged = true, server_position = "0" });
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
+        }
+        private static HttpResponseMessage Ok<T>(T body) => new(HttpStatusCode.OK) { Content = JsonContent.Create(body) };
     }
 
     private sealed class KitchenFlowHandler(

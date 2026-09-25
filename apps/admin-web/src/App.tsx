@@ -345,6 +345,15 @@ function AdminApp({ token, onSignOut }: { token: string; onSignOut: () => void }
     setToast('تم إنشاء رمز تسجيل صالح لمدة ٣٠ دقيقة');
     return result;
   };
+  const disableDevice = async (id: string) => {
+    const device = await api.disableDevice(token, id);
+    setData((current) => ({
+      ...current,
+      devices: current.devices.map((entry) => entry.id === id ? device : entry),
+    }));
+    setToast('تم تعطيل الجهاز وإلغاء بيانات اعتماده مع الاحتفاظ بسجله');
+    return device;
+  };
   const loadBranchOverview = useCallback((siteId: string) => api.branchOverview(token, siteId), [token]);
   const requestStockAdjustment = async (siteId: string, input: { itemId: string; location: BranchOverview['stock'][number]['location']; deltaScaled: string; reason: string; expectedVersion: number }) => {
     const result = await api.requestStockAdjustment(token, siteId, input);
@@ -429,6 +438,7 @@ function AdminApp({ token, onSignOut }: { token: string; onSignOut: () => void }
               onUpdateRole={updateRole}
               onArchiveRole={archiveRole}
               onIssueEnrollmentToken={issueEnrollmentToken}
+              onDisableDevice={disableDevice}
               onLoadBranchOverview={loadBranchOverview}
               onRequestStockAdjustment={requestStockAdjustment}
               onLoadCafeOverview={loadCafeOverview}
@@ -451,7 +461,7 @@ function AdminApp({ token, onSignOut }: { token: string; onSignOut: () => void }
   );
 }
 
-function PageContent({ page, data, lastLoaded, onCreateSite, onUpdateSite, onArchiveSite, onCreateItem, onUpdateItem, onArchiveItem, onCreateUser, onUpdateUser, onArchiveUser, onCreateRole, onUpdateRole, onArchiveRole, onIssueEnrollmentToken, onLoadBranchOverview, onRequestStockAdjustment, onLoadCafeOverview, onCreateCafeCustomer, onUpdateCafeCustomer, onArchiveCafeCustomer, onSetCafePrice, onLoadKitchenOverview, onLoadConflicts, onDecideConflict, onNavigate, selectedSiteId, onSelectSite, token }: {
+function PageContent({ page, data, lastLoaded, onCreateSite, onUpdateSite, onArchiveSite, onCreateItem, onUpdateItem, onArchiveItem, onCreateUser, onUpdateUser, onArchiveUser, onCreateRole, onUpdateRole, onArchiveRole, onIssueEnrollmentToken, onDisableDevice, onLoadBranchOverview, onRequestStockAdjustment, onLoadCafeOverview, onCreateCafeCustomer, onUpdateCafeCustomer, onArchiveCafeCustomer, onSetCafePrice, onLoadKitchenOverview, onLoadConflicts, onDecideConflict, onNavigate, selectedSiteId, onSelectSite, token }: {
   token: string;
   page: PageKey;
   data: AdminData;
@@ -469,6 +479,7 @@ function PageContent({ page, data, lastLoaded, onCreateSite, onUpdateSite, onArc
   onUpdateRole: (id: string, input: { code?: string; name?: string; permissions?: string[]; active?: boolean }) => Promise<void>;
   onArchiveRole: (id: string) => Promise<void>;
   onIssueEnrollmentToken: (siteId: string) => Promise<{ id: string; token: string; siteId: string; profile: SiteType; expiresAt: string }>;
+  onDisableDevice: (id: string) => Promise<Device>;
   onLoadBranchOverview: (siteId: string) => Promise<BranchOverview>;
   onRequestStockAdjustment: (siteId: string, input: { itemId: string; location: BranchOverview['stock'][number]['location']; deltaScaled: string; reason: string; expectedVersion: number }) => Promise<{ id: string; status: string; delta_scaled: string; created_at: string }>;
   onLoadCafeOverview: () => Promise<CafeOverview>;
@@ -491,7 +502,7 @@ function PageContent({ page, data, lastLoaded, onCreateSite, onUpdateSite, onArc
     case 'conflicts': return <ConflictsPage onLoad={onLoadConflicts} onDecide={onDecideConflict} />;
     case 'catalog': return <CatalogPage items={data.items} onCreate={onCreateItem} onUpdate={onUpdateItem} onArchive={onArchiveItem} />;
     case 'team': return <TeamPage users={data.users} roles={data.roles} sites={data.sites} onCreateUser={onCreateUser} onUpdateUser={onUpdateUser} onArchiveUser={onArchiveUser} onCreateRole={onCreateRole} onUpdateRole={onUpdateRole} onArchiveRole={onArchiveRole} />;
-    case 'operations': return <OperationsPage data={data} onIssueEnrollmentToken={onIssueEnrollmentToken} token={token} />;
+    case 'operations': return <OperationsPage data={data} onIssueEnrollmentToken={onIssueEnrollmentToken} onDisableDevice={onDisableDevice} token={token} />;
   }
 }
 
@@ -905,13 +916,15 @@ function TeamPage({ users, roles, sites, onCreateUser, onUpdateUser, onArchiveUs
   </div>;
 }
 
-function OperationsPage({ data, onIssueEnrollmentToken, token }: { data: AdminData; token: string; onIssueEnrollmentToken: (siteId: string) => Promise<{ id: string; token: string; siteId: string; profile: SiteType; expiresAt: string }> }) {
+function OperationsPage({ data, onIssueEnrollmentToken, onDisableDevice, token }: { data: AdminData; token: string; onIssueEnrollmentToken: (siteId: string) => Promise<{ id: string; token: string; siteId: string; profile: SiteType; expiresAt: string }>; onDisableDevice: (id: string) => Promise<Device> }) {
   const [enrollment, setEnrollment] = useState<{ token: string; siteId: string; expiresAt: string } | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [downloadProgress, setDownloadProgress] = useState(0);
   const downloadController = useRef<AbortController | null>(null);
   const [busySite, setBusySite] = useState<string | null>(null);
   const [message, setMessage] = useState('');
+  const [confirmDisableId, setConfirmDisableId] = useState<string | null>(null);
+  const [disablingId, setDisablingId] = useState<string | null>(null);
   const [branchOneRelease, setBranchOneRelease] = useState<Awaited<ReturnType<typeof api.branchOneRelease>> | null>(null);
   const [branchOneTouchRelease, setBranchOneTouchRelease] = useState<Awaited<ReturnType<typeof api.branchOneTouchRelease>> | null>(null);
   const [kitchenRelease, setKitchenRelease] = useState<Awaited<ReturnType<typeof api.kitchenRelease>> | null>(null);
@@ -931,7 +944,7 @@ function OperationsPage({ data, onIssueEnrollmentToken, token }: { data: AdminDa
   };
   return <div className="page-stack">
     <section className="panel enrollment-panel"><PanelHeading title="إعداد أجهزة الفروع" subtitle="عنوان الخادم والمواقع محفوظان هنا؛ أنشئ رمز ربط جديداً عند إعداد كل جهاز" /><div className="detail-list"><div><dt>عنوان الخادم في التطبيق</dt><dd className="ltr">https://ascendyz.xyz/api/v1</dd></div><div><dt>طريقة الربط</dt><dd>الإعدادات ← ربط الجهاز بالخادم ← الصق العنوان والرمز</dd></div></div><div className="enrollment-sites">{data.sites.filter((site) => site.active).map((site) => <button key={site.id} disabled={busySite === site.id} onClick={async () => { setBusySite(site.id); setMessage(''); try { const result = await onIssueEnrollmentToken(site.id); setEnrollment(result); } catch (caught) { setMessage(friendlyError(caught)); } finally { setBusySite(null); } }}><span className="site-icon"><MonitorSmartphone /></span><span><strong>{site.name}</strong><small>{site.code} · {siteTypeLabels[site.type]}</small></span><span>إنشاء رمز ربط</span></button>)}</div>{message && <div className="form-error">{message}</div>}{enrollment && <div className="one-time-token"><div><strong>رمز ربط لمرة واحدة</strong><small>ينتهي {formatDate(enrollment.expiresAt)}. انسخه الآن؛ يمكنك إصدار رمز جديد لاحقاً.</small></div><code>{enrollment.token}</code><button className="secondary-button" onClick={() => { void navigator.clipboard.writeText(enrollment.token); }}>نسخ الرمز</button></div>}</section>
-    <section className="panel table-panel"><PanelHeading title="الأجهزة والمزامنة" subtitle="حالة التسجيل وآخر اتصال لكل جهاز" /><div className="table-wrap"><table><thead><tr><th>الجهاز</th><th>الموقع</th><th>الملف</th><th>التسجيل</th><th>آخر ظهور</th><th>الإصدار</th></tr></thead><tbody>{data.devices.map((device) => <tr key={device.id}><td className="ltr">{device.id.slice(0, 8)}</td><td>{data.sites.find((site) => site.id === device.siteId)?.name || 'موقع غير معروف'}</td><td>{siteTypeLabels[device.profile]}</td><td><span className={`pill ${device.enrollmentStatus === 'ENROLLED' ? 'success' : device.enrollmentStatus === 'REVOKED' ? 'danger' : 'warning'}`}>{device.enrollmentStatus === 'ENROLLED' ? 'مسجل' : device.enrollmentStatus === 'REVOKED' ? 'ملغي' : 'بانتظار التسجيل'}</span></td><td>{device.lastSeenAt ? formatDate(device.lastSeenAt) : 'لم يتصل بعد'}</td><td><span className="ltr">المثبت: {device.appVersion || '—'}</span>{latestVersions[device.profile] && <small className="cell-note">المتاح: {latestVersions[device.profile]}</small>}</td></tr>)}</tbody></table></div>{!data.devices.length && <EmptyState icon={MonitorSmartphone} title="لا توجد أجهزة" text="سيظهر الجهاز بعد إصدار رمز تسجيل لأحد المواقع." />}</section>
+    <section className="panel table-panel"><PanelHeading title="الأجهزة والمزامنة" subtitle="الأجهزة النشطة فقط؛ التعطيل يلغي بيانات الاعتماد ويخفي الجهاز مع الاحتفاظ بسجله في الخادم" /><div className="table-wrap"><table><thead><tr><th>الجهاز</th><th>الموقع</th><th>الملف</th><th>التسجيل</th><th>آخر ظهور</th><th>الإصدار</th><th>إجراء</th></tr></thead><tbody>{data.devices.filter((device) => device.enrollmentStatus !== 'REVOKED' && device.name !== '__SERVER_SYNC__').map((device) => <tr key={device.id}><td><strong>{device.name || 'جهاز بدون اسم'}</strong><small className="cell-note ltr" title={device.id}>{device.id}</small></td><td>{data.sites.find((site) => site.id === device.siteId)?.name || 'موقع غير معروف'}</td><td>{siteTypeLabels[device.profile]}</td><td><span className={`pill ${device.enrollmentStatus === 'ENROLLED' ? 'success' : 'warning'}`}>{device.enrollmentStatus === 'ENROLLED' ? 'مسجل ونشط' : 'بانتظار التسجيل'}</span></td><td>{device.lastSeenAt ? formatDate(device.lastSeenAt) : 'لم يتصل بعد'}</td><td><span className="ltr">المثبت: {device.appVersion || '—'}</span>{latestVersions[device.profile] && <small className="cell-note">المتاح: {latestVersions[device.profile]}</small>}</td><td><div className="row-actions"><button className={confirmDisableId === device.id ? 'confirm-delete' : ''} disabled={disablingId !== null} onClick={async () => { if (confirmDisableId !== device.id) { setConfirmDisableId(device.id); return; } setDisablingId(device.id); setMessage(''); try { await onDisableDevice(device.id); setConfirmDisableId(null); } catch (caught) { setMessage(friendlyError(caught)); } finally { setDisablingId(null); } }}>{disablingId === device.id ? 'جارٍ التعطيل…' : confirmDisableId === device.id ? 'تأكيد تعطيل الجهاز' : 'تعطيل الجهاز'}</button>{confirmDisableId === device.id && disablingId === null && <button className="secondary-button" onClick={() => setConfirmDisableId(null)}>إلغاء</button>}</div></td></tr>)}</tbody></table></div>{!data.devices.some((device) => device.enrollmentStatus !== 'REVOKED' && device.name !== '__SERVER_SYNC__') && <EmptyState icon={MonitorSmartphone} title="لا توجد أجهزة نشطة" text="أنشئ رمز تسجيل لربط جهاز جديد." />}</section>
     <section className="two-column">
       <article className="panel backup-panel"><PanelHeading title="النسخ الاحتياطي" subtitle="PostgreSQL وسجل الملفات التشغيلية" /><div className="backup-visual"><DatabaseBackup size={34} /><div><strong>لم تُسجل نسخة خارجية بعد</strong><p>يلزم تحديد وجهة VPS مشفّرة وسياسة الاحتفاظ قبل التفعيل.</p></div></div><dl className="detail-list"><div><dt>قاعدة البيانات</dt><dd><span className="status-good">جاهزة</span></dd></div><div><dt>الهدف المقترح</dt><dd>RPO ساعة / RTO ٤ ساعات</dd></div><div><dt>اختبار الاستعادة</dt><dd>بانتظار إعداد الوجهة</dd></div></dl><button className="secondary-button" disabled>تشغيل نسخة الآن</button></article>
       <article className="panel table-panel"><PanelHeading title="تقارير الورديات" subtitle="ملفات Excel الأصلية لا تُستبدل" />{reports === null ? <div className="mini-loading"><RefreshCw className="spin" /> جارٍ تحميل التقارير…</div> : reports.length ? <div className="table-wrap"><table><thead><tr><th>الفرع</th><th>التاريخ</th><th>الوردية</th><th>الملف</th></tr></thead><tbody>{reports.map((report) => <tr key={report.id}><td><strong>{report.site.name}</strong></td><td>{report.business_date}</td><td>{report.shift_kind === 'MORNING' ? 'صباحية' : 'مسائية'}</td><td><button className="secondary-button" disabled={downloadingReport !== null} onClick={async () => { setDownloadingReport(report.id); setMessage(''); try { await api.downloadReport(token, report); } catch (caught) { setMessage(friendlyError(caught)); } finally { setDownloadingReport(null); } }}><Download size={16} /> {downloadingReport === report.id ? 'جارٍ التنزيل…' : 'تنزيل Excel'}</button></td></tr>)}</tbody></table></div> : <EmptyState compact icon={FileSpreadsheet} title="لا توجد تقارير مرفوعة" text="ستظهر ملفات .xlsx بعد إغلاق أول وردية ومزامنتها." />}</article>

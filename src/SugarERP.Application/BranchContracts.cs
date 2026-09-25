@@ -76,6 +76,7 @@ public interface IBranchOperations
     Task<OpenShiftSnapshot> OpenShiftAsync(ShiftKind kind, long openingCashMinor, CancellationToken cancellationToken = default);
     Task<SaleReceipt> CompleteSaleAsync(CompleteSaleCommand command, CancellationToken cancellationToken = default);
     Task SaveEnrollmentAsync(EnrollmentCommand command, EnrollmentResult result, CancellationToken cancellationToken = default);
+    Task ClearEnrollmentAsync(CancellationToken cancellationToken = default);
     Task SetTouchModeAsync(bool enabled, CancellationToken cancellationToken = default);
 }
 

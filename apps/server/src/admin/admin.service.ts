@@ -311,7 +311,8 @@ export class AdminService {
   setCafePrice(customerId: string, itemId: string, input: SetCafePriceDto) {
     return this.prisma.$transaction(async (transaction) => {
       await transaction.cafeCustomer.findUniqueOrThrow({ where: { id: customerId } });
-      await transaction.item.findUniqueOrThrow({ where: { id: itemId } });
+      const item = await transaction.item.findFirst({ where: { id: itemId, kind: 'PRODUCT', active: true } });
+      if (!item) throw new HttpException({ code: 'INVALID_CAFE_PRODUCT', message: 'Cafe prices require an active product' }, 422);
       const current = await transaction.cafeItemPrice.findUnique({
         where: { customerId_itemId: { customerId, itemId } },
       });

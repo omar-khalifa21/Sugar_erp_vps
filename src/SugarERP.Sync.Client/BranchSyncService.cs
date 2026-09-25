@@ -283,7 +283,11 @@ public sealed class BranchSyncService(HttpClient httpClient, LocalDatabase datab
         var outstanding = await db.OutboxMessages
             .Where(value => value.State != OutboxState.Acknowledged)
             .OrderBy(value => value.DeviceSequence)
-            .Take(100)
+            // Keep retries narrowly isolated: one semantically invalid legacy
+            // event must not prevent earlier independent events from draining.
+            // The loop runs continuously, so ordering and throughput remain
+            // deterministic while recovery is safer.
+            .Take(1)
             .ToListAsync(cancellationToken);
         if (outstanding.Count == 0) return new SyncRunResult(0, 0, 0, "كل الحركات مرفوعة بالفعل.", true);
 

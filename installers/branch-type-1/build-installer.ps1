@@ -3,7 +3,8 @@ param(
     [string]$Version = '0.2.0',
     [string]$Runtime = 'win-x64',
     [uri]$ApiBaseUrl = 'https://ascendyz.xyz/api/v1',
-    [switch]$Production
+    [switch]$Production,
+    [switch]$AllowUnsignedInternal
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,7 +50,7 @@ if (-not $compiler) {
 }
 if (-not $compiler) { throw 'NSIS 3.11 or newer is required to compile the installers.' }
 
-& "$PSScriptRoot\..\shared\Sign-Artifact.ps1" -Path "$publishRoot\SugarERP.Branch1.exe" -Production:$Production
+& "$PSScriptRoot\..\shared\Sign-Artifact.ps1" -Path "$publishRoot\SugarERP.Branch1.exe" -Production:$Production -AllowUnsignedInternal:$AllowUnsignedInternal
 foreach ($variant in @('Desktop', 'Touch')) {
     $product = if ($variant -eq 'Touch') { 'branch-type-1-touch' } else { 'branch-type-1' }
     $variantRoot = Join-Path $artifactRoot $product
@@ -58,9 +59,9 @@ foreach ($variant in @('Desktop', 'Touch')) {
     if ($LASTEXITCODE -ne 0) { throw "NSIS compilation failed for $variant." }
     $artifactName = if ($variant -eq 'Touch') { "Sugar-Branch-Type-1-Touch-$Version.exe" } else { "Sugar-Branch-Type-1-$Version.exe" }
     $artifact = Join-Path $variantRoot $artifactName
-    & "$PSScriptRoot\..\shared\Sign-Artifact.ps1" -Path $artifact -Production:$Production
+    & "$PSScriptRoot\..\shared\Sign-Artifact.ps1" -Path $artifact -Production:$Production -AllowUnsignedInternal:$AllowUnsignedInternal
     if ($Production) {
-        & "$PSScriptRoot\..\shared\Write-ReleaseManifest.ps1" -Artifact $artifact -Version $Version -Output (Join-Path $variantRoot 'current.json') -ReleaseNotes "Branch Type 1 $variant production release"
+        & "$PSScriptRoot\..\shared\Write-ReleaseManifest.ps1" -Artifact $artifact -Version $Version -Output (Join-Path $variantRoot 'current.json') -ReleaseNotes "Branch Type 1 $variant release with custom orders, product-only catalog sync, and safe reconnection" -AllowUnsignedInternal:$AllowUnsignedInternal
     }
 }
 

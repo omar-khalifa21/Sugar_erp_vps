@@ -11,11 +11,12 @@ namespace SugarERP.Kitchen;
 public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
 {
     private readonly SemaphoreSlim _syncGate = new(1, 1);
+    private DateTimeOffset _lastBootstrapAtUtc = DateTimeOffset.MinValue;
 
     public async Task EnrollAsync(Uri api, string token, string deviceName)
     {
         await using (var existing = store.Open())
-            if (await existing.Configuration.AnyAsync()) throw new BusinessRuleException("ALREADY_ENROLLED", "الجهاز مرتبط بالفعل؛ لا تغير هويته محلياً.");
+            if (await existing.Configuration.AnyAsync(x => x.DeviceId != Guid.Empty)) throw new BusinessRuleException("ALREADY_ENROLLED", "الجهاز مرتبط بالفعل؛ لا تغير هويته محلياً.");
         var result = await new EnrollmentClient(http).EnrollAsync(new EnrollmentCommand(api, token, deviceName,
             EnrollmentClient.CreateKeyThumbprint(), System.Reflection.Assembly.GetEntryAssembly()?.GetName().Version?.ToString(3) ?? "0.0.0", false, DeviceProfile.Kitchen));
         if (result.Profile != DeviceProfile.Kitchen) throw new InvalidOperationException("رمز التسجيل ليس لموقع مطبخ.");
@@ -23,10 +24,45 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
         try
         {
             await using var db = store.Open();
-            if (await db.Configuration.AnyAsync()) throw new BusinessRuleException("ALREADY_ENROLLED", "الجهاز مرتبط بالفعل.");
-            db.Configuration.Add(new KitchenConfiguration { ApiBaseUrl = api.ToString().TrimEnd('/'), SiteId = result.SiteId,
-                DeviceId = result.DeviceId, ProtectedCredential = DeviceCredentialProtector.Protect(result.Credential), StreamEpoch = result.StreamEpoch });
+            var configuration = await db.Configuration.SingleOrDefaultAsync();
+            if (configuration is not null && configuration.DeviceId != Guid.Empty) throw new BusinessRuleException("ALREADY_ENROLLED", "الجهاز مرتبط بالفعل.");
+            if (configuration is null)
+            {
+                configuration = new KitchenConfiguration();
+                db.Configuration.Add(configuration);
+            }
+            configuration.ApiBaseUrl = api.ToString().TrimEnd('/');
+            configuration.SiteId = result.SiteId;
+            configuration.DeviceId = result.DeviceId;
+            configuration.ProtectedCredential = DeviceCredentialProtector.Protect(result.Credential);
+            configuration.StreamEpoch = result.StreamEpoch;
+            configuration.NextDeviceSequence = 1;
+            configuration.Cursor = null;
             await db.SaveChangesAsync();
+            _lastBootstrapAtUtc = DateTimeOffset.MinValue;
+        }
+        finally { store.WriteLock.Release(); }
+    }
+
+    public async Task ResetConnectionAsync(CancellationToken cancellationToken = default)
+    {
+        await store.WriteLock.WaitAsync(cancellationToken);
+        try
+        {
+            await using var db = store.Open();
+            if (await db.Outbox.AnyAsync(x => !x.Acknowledged, cancellationToken))
+                throw new BusinessRuleException("PENDING_SYNC_EXISTS", "لا يمكن إلغاء الربط لأن عمليات محلية لم تصل للخادم بعد. استعد الاتصال أو تواصل مع الإدارة أولاً.");
+            var configuration = await db.Configuration.SingleOrDefaultAsync(cancellationToken);
+            if (configuration is null) return;
+            configuration.ApiBaseUrl = string.Empty;
+            configuration.SiteId = Guid.Empty;
+            configuration.DeviceId = Guid.Empty;
+            configuration.ProtectedCredential = string.Empty;
+            configuration.StreamEpoch = 0;
+            configuration.NextDeviceSequence = 1;
+            configuration.Cursor = null;
+            await db.SaveChangesAsync(cancellationToken);
+            _lastBootstrapAtUtc = DateTimeOffset.MinValue;
         }
         finally { store.WriteLock.Release(); }
     }
@@ -37,10 +73,20 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
         try
         {
             Trace.WriteLine("[SYNC] Kitchen item/request sync started.");
+            await using (var enrollment = store.Open())
+                if (!await enrollment.Configuration.AnyAsync(x => x.DeviceId != Guid.Empty, cancellationToken))
+                    throw new BusinessRuleException("DEVICE_NOT_ENROLLED", "اربط جهاز المطبخ بالخادم مرة واحدة أولاً.");
             await RecoverMissingRequestAcknowledgementsAsync(cancellationToken);
             await FlushAsync(cancellationToken, forceRetry);
-            await BootstrapAsync(cancellationToken);
             var total = 0;
+            if (DateTimeOffset.UtcNow - _lastBootstrapAtUtc >= TimeSpan.FromMinutes(5))
+            {
+                await BootstrapAsync(cancellationToken);
+                _lastBootstrapAtUtc = DateTimeOffset.UtcNow;
+                // Bootstrap is the authoritative fallback for admin-originated
+                // changes that are not represented by a desktop sync event.
+                total++;
+            }
             while (true)
             {
                 var result = await PullPageAsync(cancellationToken);
@@ -57,10 +103,12 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
                     .FirstOrDefaultAsync(value => !value.Acknowledged, cancellationToken);
                 if (blocked is not null)
                 {
-                    var detail = blocked.PermanentlyFailed
-                        ? $"تعذر إرسال عملية محفوظة ({blocked.LastErrorCode ?? "SYNC_REJECTED"}). راجع الإدارة؛ لم تُحذف العملية."
-                        : "توجد عمليات محفوظة بانتظار الاتصال بالخادم، وستتم إعادة إرسالها تلقائياً.";
-                    throw new InvalidOperationException(detail);
+                    if (blocked.PermanentlyFailed)
+                        throw new InvalidOperationException($"تعذر إرسال عملية محفوظة ({blocked.LastErrorCode ?? "SYNC_REJECTED"}). راجع الإدارة؛ لم تُحذف العملية.");
+                    // A retryable outbox item is not proof that the whole app is
+                    // offline. Pull may have succeeded and the durable row will be
+                    // retried at NextAttemptAtUtc without blocking fresh downloads.
+                    Trace.WriteLine($"[SYNC] Outbox sequence {blocked.Sequence} remains scheduled for retry at {blocked.NextAttemptAtUtc:O}.");
                 }
             }
             Trace.WriteLine($"[SYNC] Kitchen sync completed; applied={total}.");
@@ -85,19 +133,43 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
             currentConfiguration.SiteName = document.RootElement.GetProperty("site").GetProperty("name").GetString() ?? "المطبخ";
             foreach (var item in catalog.Values)
             {
-                var id = item.GetProperty("id").GetGuid(); var product = await db.Products.FindAsync(id);
-                if (product is null) { product = new KitchenProduct { Id = id }; db.Products.Add(product); }
+                var id = item.GetProperty("id").GetGuid();
                 var version = item.GetProperty("version").GetInt32();
+                var kind = item.GetProperty("kind").GetString() ?? "PRODUCT";
+                if (kind == "INGREDIENT")
+                {
+                    var ingredient = await db.Ingredients.FindAsync(id);
+                    if (ingredient is null) { ingredient = new KitchenIngredientBalance { ItemId = id }; db.Ingredients.Add(ingredient); }
+                    if (version < ingredient.Version) continue;
+                    ingredient.Sku = item.GetProperty("sku").GetString()!;
+                    ingredient.Name = item.GetProperty("nameAr").GetString()!;
+                    ingredient.Unit = item.GetProperty("unit").GetString()!;
+                    ingredient.QuantityScale = item.GetProperty("quantityScale").GetInt32();
+                    ingredient.Active = item.GetProperty("active").GetBoolean();
+                    ingredient.Version = version; ingredient.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                    var legacyProduct = await db.Products.FindAsync(id);
+                    if (legacyProduct is not null && legacyProduct.Kind == "INGREDIENT") legacyProduct.Active = false;
+                    continue;
+                }
+                var product = await db.Products.FindAsync(id);
+                if (product is null) { product = new KitchenProduct { Id = id }; db.Products.Add(product); }
                 if (version < product.Version) continue;
                 product.Sku = item.GetProperty("sku").GetString()!;
                 product.Name = item.GetProperty("nameAr").GetString()!; product.Unit = item.GetProperty("unit").GetString()!;
-                product.Kind = item.GetProperty("kind").GetString() ?? "PRODUCT";
-                product.QuantityScale = item.GetProperty("quantityScale").GetInt32();
-                if (product.Kind == "PRODUCT") product.BasePriceMinor = item.GetProperty("retailPriceMinor").GetInt64();
+                product.Kind = "PRODUCT"; product.QuantityScale = item.GetProperty("quantityScale").GetInt32();
+                product.BasePriceMinor = item.GetProperty("retailPriceMinor").GetInt64();
                 product.Active = item.GetProperty("active").GetBoolean(); product.Version = version; product.UpdatedAtUtc = DateTimeOffset.UtcNow;
-                if (product.Kind == "INGREDIENT" && await db.Ingredients.FindAsync(id) is null)
-                    db.Ingredients.Add(new KitchenIngredientBalance { ItemId = id, Name = product.Name, Unit = product.Unit, QuantityScale = product.QuantityScale, Version = version });
             }
+            var serverCatalogIds = catalog.Keys.ToHashSet();
+            var pendingCatalogIds = await db.Outbox.Where(x => !x.Acknowledged
+                    && x.UploadJson.Contains("catalog.item."))
+                .Select(x => x.RequestId).ToListAsync(cancellationToken);
+            foreach (var staleProduct in await db.Products.Where(x => x.Active
+                    && !serverCatalogIds.Contains(x.Id) && !pendingCatalogIds.Contains(x.Id)).ToListAsync(cancellationToken))
+                staleProduct.Active = false;
+            foreach (var staleIngredient in await db.Ingredients.Where(x => x.Active
+                    && !serverCatalogIds.Contains(x.ItemId) && !pendingCatalogIds.Contains(x.ItemId)).ToListAsync(cancellationToken))
+                staleIngredient.Active = false;
             foreach (var row in document.RootElement.GetProperty("customers").EnumerateArray())
             {
                 var id = row.GetProperty("id").GetGuid();
@@ -110,6 +182,16 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
                 db.CafePrices.RemoveRange(customer.Prices); customer.Prices.Clear();
                 foreach (var price in row.GetProperty("prices").EnumerateArray()) customer.Prices.Add(new KitchenCafePrice {
                     CustomerId = id, ItemId = price.GetProperty("itemId").GetGuid(), UnitPriceMinor = price.GetProperty("priceMinor").GetInt64(), Version = price.GetProperty("version").GetInt32() });
+            }
+            var activeCustomerIds = document.RootElement.GetProperty("customers").EnumerateArray()
+                .Select(x => x.GetProperty("id").GetGuid()).ToHashSet();
+            var pendingCustomerIds = await db.Outbox.Where(x => !x.Acknowledged && x.UploadJson.Contains("cafe_customer."))
+                .Select(x => x.RequestId).ToListAsync(cancellationToken);
+            foreach (var staleCustomer in await db.CafeCustomers.Where(x => x.Active
+                    && !activeCustomerIds.Contains(x.Id) && !pendingCustomerIds.Contains(x.Id)).ToListAsync(cancellationToken))
+            {
+                staleCustomer.Active = false;
+                staleCustomer.HiddenLocally = true;
             }
             foreach (var row in document.RootElement.GetProperty("recipes").EnumerateArray())
             {
@@ -125,7 +207,7 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
                 var itemId = row.GetProperty("itemId").GetGuid(); if (!catalog.TryGetValue(itemId, out var item) || item.GetProperty("kind").GetString() != "INGREDIENT") continue;
                 var balance = await db.Ingredients.FindAsync(itemId); if (balance is null) { balance = new KitchenIngredientBalance { ItemId = itemId }; db.Ingredients.Add(balance); }
                 balance.Name = item.GetProperty("nameAr").GetString()!; balance.Unit = item.GetProperty("unit").GetString()!; balance.QuantityScale = item.GetProperty("quantityScale").GetInt32();
-                balance.QuantityScaled = ParseInteger(row.GetProperty("quantityScaled"), true); balance.Version = row.GetProperty("version").GetInt32();
+                balance.QuantityScaled = ParseInteger(row.GetProperty("quantityScaled"), true); balance.StockVersion = row.GetProperty("version").GetInt32();
                 balance.InventoryCostMinor = row.TryGetProperty("inventoryCostMinor", out var inventoryCost)
                     ? ParseInteger(inventoryCost, true) : balance.InventoryCostMinor;
             }
@@ -163,6 +245,13 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
                 if (incoming.EventType == "kitchen_return.dispatched") ApplyReturn(db, incoming);
                 if (incoming.EventType is "catalog.item_published" or "catalog.item.updated")
                     await ApplyCatalogItemAsync(db, incoming.Payload, (await db.Configuration.SingleAsync(cancellationToken)).SiteId);
+                if (incoming.EventType == "catalog.item.deleted")
+                    await ApplyCatalogArchiveAsync(db, incoming.Payload);
+                if (incoming.EventType == "recipe.updated")
+                    await ApplyRecipeAsync(db, incoming.Payload, cancellationToken);
+                if (incoming.EventType is "cafe_customer.created" or "cafe_customer.updated" or
+                    "cafe_customer.archived" or "cafe_customer.price_list_updated")
+                    await ApplyCafeCustomerEventAsync(db, incoming.EventType, incoming.Payload, cancellationToken);
                 db.Inbox.Add(new KitchenInbox { EventId = incoming.Id, ContentHash = incoming.ContentHash, AppliedAtUtc = DateTimeOffset.UtcNow });
                 applied++;
             }
@@ -190,14 +279,16 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
             var selected = request.Lines.Where(x => quantities.GetValueOrDefault(x.Id) > 0).ToArray();
             if (selected.Length == 0 || selected.Any(x => quantities[x.Id] > x.RequestedScaled - x.SentScaled)) throw new InvalidOperationException("كمية الإرسال غير صالحة.");
             var recipes = await db.Recipes.Include(x => x.Components).Where(x => selected.Select(line => line.ItemId).Contains(x.ProductItemId)).ToDictionaryAsync(x => x.ProductItemId);
-            if (recipes.Count != selected.Select(x => x.ItemId).Distinct().Count()) throw new BusinessRuleException("RECIPE_REQUIRED", "لا يمكن الإرسال: توجد أصناف بلا وصفة فعالة منشورة من الإدارة.");
+            var missingRecipeNames = selected.Where(x => !recipes.ContainsKey(x.ItemId)).Select(x => x.Name).Distinct().ToArray();
+            if (missingRecipeNames.Length > 0) throw new BusinessRuleException("RECIPE_REQUIRED",
+                $"لا يمكن الإرسال: المنتجات التالية بلا وصفة فعالة: {string.Join("، ", missingRecipeNames)}.");
             var ingredientUse = new Dictionary<Guid, long>();
             var recipeSnapshot = selected.Select(line => {
                 var recipe = recipes[line.ItemId]; var output = quantities[line.Id];
                 var components = recipe.Components.Select(component => { var numerator = checked(output * component.QuantityScaled); if (numerator % recipe.OutputScaled != 0) throw new BusinessRuleException("RECIPE_ROUNDING", "كمية الإنتاج لا تطابق وحدات الوصفة؛ عدّل الكمية."); var used = numerator / recipe.OutputScaled; ingredientUse[component.IngredientItemId] = checked(ingredientUse.GetValueOrDefault(component.IngredientItemId) + used); return new { ingredient_item_id = component.IngredientItemId, quantity_scaled = used.ToString() }; }).ToArray();
                 return new { product_item_id = line.ItemId, output_scaled = output.ToString(), recipe_version = recipe.Version, components };
             }).ToArray();
-            var balances = await db.Ingredients.Where(x => ingredientUse.Keys.Contains(x.ItemId)).ToDictionaryAsync(x => x.ItemId);
+            var balances = await db.Ingredients.Where(x => x.Active && ingredientUse.Keys.Contains(x.ItemId)).ToDictionaryAsync(x => x.ItemId);
             if (balances.Count != ingredientUse.Count || ingredientUse.Any(x => balances[x.Key].QuantityScaled < x.Value)) throw new BusinessRuleException("INSUFFICIENT_INGREDIENTS", "الخامات لا تكفي لإرسال هذه الشحنة.");
             var ingredientCosts = ingredientUse.ToDictionary(x => x.Key,
                 x => CostForUse(balances[x.Key].InventoryCostMinor, balances[x.Key].QuantityScaled, x.Value));
@@ -224,7 +315,7 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
             foreach (var use in ingredientUse)
             {
                 var balance = balances[use.Key]; balance.QuantityScaled -= use.Value;
-                balance.InventoryCostMinor -= ingredientCosts[use.Key]; balance.Version++;
+                balance.InventoryCostMinor -= ingredientCosts[use.Key]; balance.StockVersion++;
                 var movementLine = upload.Payload.GetProperty("ingredient_lines").EnumerateArray()
                     .Single(x => x.GetProperty("ingredient_item_id").GetGuid() == use.Key);
                 db.IngredientMovements.Add(new KitchenIngredientMovement { Id = movementLine.GetProperty("line_id").GetGuid(),
@@ -309,7 +400,9 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
             var productIds = order.Lines.Select(x => x.ItemId).ToArray();
             var recipes = await db.Recipes.Include(x => x.Components)
                 .Where(x => productIds.Contains(x.ProductItemId)).ToDictionaryAsync(x => x.ProductItemId, cancellationToken);
-            if (recipes.Count != productIds.Length) throw new BusinessRuleException("RECIPE_REQUIRED", "أحد المنتجات بلا وصفة محفوظة.");
+            var missingRecipeNames = order.Lines.Where(x => !recipes.ContainsKey(x.ItemId)).Select(x => x.ItemName).Distinct().ToArray();
+            if (missingRecipeNames.Length > 0) throw new BusinessRuleException("RECIPE_REQUIRED",
+                $"لا يمكن التسليم: المنتجات التالية بلا وصفة محفوظة: {string.Join("، ", missingRecipeNames)}.");
             var ingredientUse = new Dictionary<Guid, long>();
             var snapshots = order.Lines.Select(line =>
             {
@@ -325,7 +418,7 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
                 return new { product_item_id = line.ItemId, output_scaled = line.QuantityScaled.ToString(),
                     recipe_version = recipe.Version, components = componentRows };
             }).ToArray();
-            var balances = await db.Ingredients.Where(x => ingredientUse.Keys.Contains(x.ItemId))
+            var balances = await db.Ingredients.Where(x => x.Active && ingredientUse.Keys.Contains(x.ItemId))
                 .ToDictionaryAsync(x => x.ItemId, cancellationToken);
             if (balances.Count != ingredientUse.Count || ingredientUse.Any(x => balances[x.Key].QuantityScaled < x.Value))
                 throw new BusinessRuleException("INSUFFICIENT_INGREDIENTS", "لا توجد خامات كافية لتجهيز طلب الكافيه.");
@@ -345,7 +438,7 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
             foreach (var use in ingredientUse)
             {
                 var balance = balances[use.Key]; balance.QuantityScaled -= use.Value;
-                balance.InventoryCostMinor -= costs[use.Key]; balance.Version++;
+                balance.InventoryCostMinor -= costs[use.Key]; balance.StockVersion++;
                 var line = upload.Payload.GetProperty("ingredient_lines").EnumerateArray()
                     .Single(x => x.GetProperty("ingredient_item_id").GetGuid() == use.Key);
                 db.IngredientMovements.Add(new KitchenIngredientMovement { Id = line.GetProperty("line_id").GetGuid(),
@@ -385,37 +478,203 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
             await using var db = store.Open();
             await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
             var configuration = await db.Configuration.SingleAsync(cancellationToken);
-            var product = itemId is Guid id ? await db.Products.FindAsync([id], cancellationToken) : null;
-            if (itemId is not null && product is null) throw new InvalidOperationException("الصنف غير موجود محلياً.");
-            if (product is not null && product.Version != expectedVersion) throw new InvalidOperationException("تم تحديث الصنف؛ افتحه من جديد.");
             var now = DateTimeOffset.UtcNow;
-            if (product is null)
+            KitchenProduct result;
+            if (kind == "PRODUCT")
             {
-                var newId = Guid.NewGuid();
-                product = new KitchenProduct { Id = newId, Sku = $"AUTO-{newId:N}", Version = 1, Active = true };
-                db.Products.Add(product);
+                var product = itemId is Guid id ? await db.Products.FindAsync([id], cancellationToken) : null;
+                if (itemId is not null && product is null) throw new InvalidOperationException("المنتج غير موجود محلياً أو نوعه مختلف.");
+                if (product is not null && product.Version != expectedVersion) throw new InvalidOperationException("تم تحديث المنتج؛ افتحه من جديد.");
+                if (product is null)
+                {
+                    var newId = Guid.NewGuid();
+                    product = new KitchenProduct { Id = newId, Sku = $"AUTO-{newId:N}", Version = 1, Active = true, Kind = "PRODUCT" };
+                    db.Products.Add(product);
+                }
+                else product.Version = checked(product.Version + 1);
+                product.Name = name; product.Unit = unit; product.QuantityScale = quantityScale;
+                product.BasePriceMinor = basePriceMinor; product.Active = true; product.UpdatedAtUtc = now;
+                result = product;
             }
-            else product.Version = checked(product.Version + 1);
-            product.Name = name; product.Unit = unit; product.QuantityScale = quantityScale; product.Kind = kind;
-            product.BasePriceMinor = kind == "PRODUCT" ? basePriceMinor : 0;
-            product.Active = true; product.UpdatedAtUtc = now;
-            if (kind == "INGREDIENT" && await db.Ingredients.FindAsync([product.Id], cancellationToken) is null)
-                db.Ingredients.Add(new KitchenIngredientBalance { ItemId = product.Id, Name = name, Unit = unit, QuantityScale = quantityScale, Version = product.Version });
+            else
+            {
+                var ingredient = itemId is Guid id ? await db.Ingredients.FindAsync([id], cancellationToken) : null;
+                if (itemId is not null && ingredient is null) throw new InvalidOperationException("الخامة غير موجودة محلياً أو نوعها مختلف.");
+                if (ingredient is not null && ingredient.Version != expectedVersion) throw new InvalidOperationException("تم تحديث الخامة؛ افتحها من جديد.");
+                if (ingredient is null)
+                {
+                    var newId = Guid.NewGuid();
+                    ingredient = new KitchenIngredientBalance { ItemId = newId, Sku = $"AUTO-{newId:N}", Version = 1, Active = true };
+                    db.Ingredients.Add(ingredient);
+                }
+                else ingredient.Version = checked(ingredient.Version + 1);
+                ingredient.Name = name; ingredient.Unit = unit; ingredient.QuantityScale = quantityScale;
+                ingredient.Active = true; ingredient.UpdatedAtUtc = now;
+                result = new KitchenProduct { Id = ingredient.ItemId, Sku = ingredient.Sku, Name = ingredient.Name,
+                    Unit = ingredient.Unit, QuantityScale = ingredient.QuantityScale, Kind = "INGREDIENT",
+                    Active = ingredient.Active, Version = ingredient.Version, UpdatedAtUtc = ingredient.UpdatedAtUtc };
+            }
 
             var eventId = Guid.NewGuid();
-            var payload = new { item_id = product.Id, site_id = configuration.SiteId, sku = product.Sku, name_ar = product.Name,
-                unit = product.Unit, quantity_scale = product.QuantityScale, retail_price_minor = product.BasePriceMinor, kind = product.Kind,
-                active = product.Active, version = product.Version };
+            var payload = new { item_id = result.Id, site_id = configuration.SiteId, sku = result.Sku, name_ar = result.Name,
+                unit = result.Unit, quantity_scale = result.QuantityScale, retail_price_minor = result.BasePriceMinor, kind = result.Kind,
+                active = result.Active, version = result.Version };
             var contractEvent = ContractEventFactory.Create(eventId, configuration.NextDeviceSequence, "catalog.item.updated", now, payload);
             using var document = JsonDocument.Parse(contractEvent.PayloadJson);
             var upload = new SyncUploadEvent(contractEvent.Id, contractEvent.DeviceSequence, contractEvent.EventType,
                 contractEvent.SchemaVersion, contractEvent.OccurredAtUtc.ToString("O"), document.RootElement.Clone(), [], contractEvent.ContentHash);
-            db.Outbox.Add(new KitchenOutbox { EventId = eventId, RequestId = product.Id, Sequence = configuration.NextDeviceSequence,
+            db.Outbox.Add(new KitchenOutbox { EventId = eventId, RequestId = result.Id, Sequence = configuration.NextDeviceSequence,
                 UploadJson = JsonSerializer.Serialize(upload), AppliedLocally = true, NextAttemptAtUtc = now });
             configuration.NextDeviceSequence++;
             await db.SaveChangesAsync(cancellationToken); await transaction.CommitAsync(cancellationToken);
-            Trace.WriteLine($"[SYNC] Queued Kitchen catalog item {product.Id}; sequence={upload.DeviceSequence}.");
-            return product;
+            Trace.WriteLine($"[SYNC] Queued Kitchen catalog item {result.Id}; sequence={upload.DeviceSequence}.");
+            return result;
+        }
+        finally { store.WriteLock.Release(); }
+    }
+
+    public async Task<KitchenIngredientBalance> CreateIngredientWithOpeningPurchaseAsync(
+        string name,
+        string unit,
+        int quantityScale,
+        long pricingQuantityScaled,
+        long purchasePriceMinor,
+        CancellationToken cancellationToken = default)
+    {
+        name = name.Trim(); unit = unit.Trim();
+        if (string.IsNullOrWhiteSpace(name)) throw new InvalidOperationException("اكتب اسم الخامة.");
+        if (unit is not ("قطعة" or "g" or "kg" or "ml" or "L")) throw new InvalidOperationException("اختر وحدة خامة صحيحة.");
+        if (quantityScale is < 1 or > 1000 || pricingQuantityScaled <= 0 || purchasePriceMinor <= 0)
+            throw new InvalidOperationException("أدخل كمية تسعير وسعر شراء أكبر من الصفر.");
+
+        await store.WriteLock.WaitAsync(cancellationToken);
+        try
+        {
+            await using var db = store.Open();
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+            if (await db.Ingredients.AnyAsync(x => x.Active && x.Name == name, cancellationToken))
+                throw new InvalidOperationException("توجد خامة نشطة بهذا الاسم بالفعل. استخدم إضافة مشتريات بدلاً من إنشاء نسخة جديدة.");
+            var configuration = await db.Configuration.SingleAsync(cancellationToken);
+            var now = DateTimeOffset.UtcNow;
+            var itemId = Guid.NewGuid();
+            var ingredient = new KitchenIngredientBalance
+            {
+                ItemId = itemId,
+                Sku = $"RAW-{itemId:N}",
+                Name = name,
+                Unit = unit,
+                QuantityScale = quantityScale,
+                QuantityScaled = pricingQuantityScaled,
+                InventoryCostMinor = purchasePriceMinor,
+                PurchaseUnitCostMicros = checked((long)decimal.Round((decimal)purchasePriceMinor * 10_000m * quantityScale / pricingQuantityScaled, 0, MidpointRounding.AwayFromZero)),
+                Active = true,
+                Version = 1,
+                StockVersion = 1,
+                UpdatedAtUtc = now,
+            };
+            db.Ingredients.Add(ingredient);
+
+            var catalogId = Guid.NewGuid();
+            var catalogPayload = new { item_id = itemId, site_id = configuration.SiteId, sku = ingredient.Sku, name_ar = name,
+                unit, quantity_scale = quantityScale, retail_price_minor = 0, kind = "INGREDIENT", active = true, version = 1 };
+            var catalogEvent = ContractEventFactory.Create(catalogId, configuration.NextDeviceSequence, "catalog.item.updated", now, catalogPayload);
+            using var catalogDocument = JsonDocument.Parse(catalogEvent.PayloadJson);
+            db.Outbox.Add(new KitchenOutbox { EventId = catalogId, RequestId = itemId, Sequence = configuration.NextDeviceSequence,
+                UploadJson = JsonSerializer.Serialize(new SyncUploadEvent(catalogEvent.Id, catalogEvent.DeviceSequence, catalogEvent.EventType,
+                    catalogEvent.SchemaVersion, catalogEvent.OccurredAtUtc.ToString("O"), catalogDocument.RootElement.Clone(), [], catalogEvent.ContentHash)),
+                AppliedLocally = true, NextAttemptAtUtc = now });
+            configuration.NextDeviceSequence++;
+
+            var receiptId = Guid.NewGuid();
+            var lineId = Guid.NewGuid();
+            var receiptPayload = new { operation_id = receiptId, reason = "رصيد افتتاحي عند إنشاء الخامة",
+                lines = new[] { new { line_id = lineId, item_id = itemId, quantity_scaled = pricingQuantityScaled.ToString(), total_cost_minor = purchasePriceMinor.ToString() } } };
+            var receiptEvent = ContractEventFactory.Create(receiptId, configuration.NextDeviceSequence, "ingredient.received", now, receiptPayload);
+            using var receiptDocument = JsonDocument.Parse(receiptEvent.PayloadJson);
+            db.Outbox.Add(new KitchenOutbox { EventId = receiptId, RequestId = receiptId, Sequence = configuration.NextDeviceSequence,
+                UploadJson = JsonSerializer.Serialize(new SyncUploadEvent(receiptEvent.Id, receiptEvent.DeviceSequence, receiptEvent.EventType,
+                    receiptEvent.SchemaVersion, receiptEvent.OccurredAtUtc.ToString("O"), receiptDocument.RootElement.Clone(), [], receiptEvent.ContentHash)),
+                AppliedLocally = true, NextAttemptAtUtc = now });
+            db.IngredientMovements.Add(new KitchenIngredientMovement { Id = lineId, ShipmentId = receiptId, IngredientItemId = itemId,
+                Kind = "RECEIPT", Reason = "رصيد افتتاحي عند إنشاء الخامة", DeltaScaled = pricingQuantityScaled,
+                CostMinor = purchasePriceMinor, OccurredAtUtc = now });
+            configuration.NextDeviceSequence++;
+            await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return ingredient;
+        }
+        finally { store.WriteLock.Release(); }
+    }
+
+    public async Task PermanentlyDeleteUnsyncedCatalogItemAsync(Guid itemId, CancellationToken cancellationToken = default)
+    {
+        if (itemId == Guid.Empty) throw new InvalidOperationException("اختر منتجاً أو خامة أولاً.");
+        await store.WriteLock.WaitAsync(cancellationToken);
+        try
+        {
+            await using var db = store.Open();
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+            var product = await db.Products.SingleOrDefaultAsync(x => x.Id == itemId, cancellationToken);
+            var ingredient = await db.Ingredients.SingleOrDefaultAsync(x => x.ItemId == itemId, cancellationToken);
+            if (product is null && ingredient is null) throw new InvalidOperationException("الصنف غير موجود محلياً.");
+
+            var hasHistory = await db.RequestLines.AnyAsync(x => x.ItemId == itemId, cancellationToken)
+                || await db.CustomOrderLines.AnyAsync(x => x.ItemId == itemId, cancellationToken)
+                || await db.Recipes.AnyAsync(x => x.ProductItemId == itemId, cancellationToken)
+                || await db.RecipeComponents.AnyAsync(x => x.IngredientItemId == itemId, cancellationToken)
+                || await db.IngredientMovements.AnyAsync(x => x.IngredientItemId == itemId, cancellationToken)
+                || await db.CafePrices.AnyAsync(x => x.ItemId == itemId, cancellationToken);
+            if (hasHistory)
+                throw new InvalidOperationException("لا يمكن الحذف النهائي لأن الصنف مستخدم في وصفة أو فاتورة أو حركة مخزون. استخدم الأرشفة للحفاظ على السجل.");
+
+            var catalogRows = await db.Outbox
+                .Where(x => x.RequestId == itemId && x.UploadJson.Contains("catalog.item.updated"))
+                .OrderBy(x => x.Sequence).ToListAsync(cancellationToken);
+            if (catalogRows.Any(x => x.Acknowledged))
+                throw new InvalidOperationException("لا يمكن حذف صنف وصل إلى الخادم نهائياً من جهاز المطبخ. استخدم الأرشفة حتى لا ينكسر سجل الأجهزة الأخرى.");
+            if (catalogRows.Count == 0)
+                throw new InvalidOperationException("لا يمكن إثبات أن الصنف لم يصل إلى الخادم؛ استخدم الأرشفة.");
+
+            var highestOutboxSequence = await db.Outbox.MaxAsync(x => (int?)x.Sequence, cancellationToken) ?? 0;
+            var sequencesAreContiguous = catalogRows.Select((row, index) => index == 0 || row.Sequence == catalogRows[index - 1].Sequence + 1).All(x => x);
+            if (catalogRows[^1].Sequence != highestOutboxSequence || !sequencesAreContiguous)
+                throw new InvalidOperationException("توجد عمليات أحدث تعتمد على ترتيب المزامنة. زامنها أولاً ثم استخدم الأرشفة.");
+
+            var configuration = await db.Configuration.SingleAsync(cancellationToken);
+            configuration.NextDeviceSequence = catalogRows[0].Sequence;
+            db.Outbox.RemoveRange(catalogRows);
+            if (product is not null) db.Products.Remove(product);
+            if (ingredient is not null) db.Ingredients.Remove(ingredient);
+            await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+        }
+        finally { store.WriteLock.Release(); }
+    }
+
+    public async Task ArchiveCatalogItemAsync(Guid itemId, CancellationToken cancellationToken = default)
+    {
+        await store.WriteLock.WaitAsync(cancellationToken);
+        try
+        {
+            await using var db = store.Open();
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+            var configuration = await db.Configuration.SingleAsync(cancellationToken);
+            var product = await db.Products.SingleOrDefaultAsync(x => x.Id == itemId, cancellationToken);
+            var ingredient = await db.Ingredients.SingleOrDefaultAsync(x => x.ItemId == itemId, cancellationToken);
+            if (product is null && ingredient is null) throw new InvalidOperationException("الصنف غير موجود.");
+            var version = checked((product?.Version ?? ingredient!.Version) + 1);
+            if (product is not null) { product.Active = false; product.Version = version; product.UpdatedAtUtc = DateTimeOffset.UtcNow; }
+            if (ingredient is not null) { ingredient.Active = false; ingredient.Version = version; ingredient.UpdatedAtUtc = DateTimeOffset.UtcNow; }
+            var now = DateTimeOffset.UtcNow; var eventId = Guid.NewGuid();
+            var payload = new { item_id = itemId, version };
+            var contractEvent = ContractEventFactory.Create(eventId, configuration.NextDeviceSequence, "catalog.item.archived", now, payload);
+            using var document = JsonDocument.Parse(contractEvent.PayloadJson);
+            var upload = new SyncUploadEvent(contractEvent.Id, contractEvent.DeviceSequence, contractEvent.EventType,
+                contractEvent.SchemaVersion, contractEvent.OccurredAtUtc.ToString("O"), document.RootElement.Clone(), [], contractEvent.ContentHash);
+            db.Outbox.Add(new KitchenOutbox { EventId = eventId, RequestId = itemId, Sequence = configuration.NextDeviceSequence,
+                UploadJson = JsonSerializer.Serialize(upload), AppliedLocally = true, NextAttemptAtUtc = now });
+            configuration.NextDeviceSequence++;
+            await db.SaveChangesAsync(cancellationToken); await transaction.CommitAsync(cancellationToken);
         }
         finally { store.WriteLock.Release(); }
     }
@@ -424,30 +683,132 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
     {
         var id = payload.GetProperty("item_id").GetGuid();
         var version = payload.GetProperty("version").GetInt32();
+        var itemKind = payload.TryGetProperty("kind", out var kind) ? kind.GetString() ?? "PRODUCT" : "PRODUCT";
+        var name = payload.GetProperty("name_ar").GetString() ?? throw new InvalidOperationException("اسم الصنف مفقود.");
+        var unit = payload.GetProperty("unit").GetString() ?? throw new InvalidOperationException("وحدة الصنف مفقودة.");
+        var sku = payload.GetProperty("sku").GetString() ?? $"AUTO-{id:N}";
+        var quantityScale = payload.GetProperty("quantity_scale").GetInt32();
+        var isActive = !payload.TryGetProperty("active", out var active) || active.GetBoolean();
+        if (itemKind == "INGREDIENT")
+        {
+            var ingredient = await db.Ingredients.FindAsync(id);
+            if (ingredient is not null && version <= ingredient.Version) return;
+            if (ingredient is null) { ingredient = new KitchenIngredientBalance { ItemId = id }; db.Ingredients.Add(ingredient); }
+            ingredient.Sku = sku; ingredient.Name = name; ingredient.Unit = unit;
+            ingredient.QuantityScale = quantityScale; ingredient.Active = isActive;
+            ingredient.Version = version; ingredient.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            var legacyProduct = await db.Products.FindAsync(id);
+            if (legacyProduct is not null && legacyProduct.Kind == "INGREDIENT") legacyProduct.Active = false;
+            return;
+        }
         var product = await db.Products.FindAsync(id);
         if (product is not null && version <= product.Version) return;
         if (product is null) { product = new KitchenProduct { Id = id }; db.Products.Add(product); }
-        product.Sku = payload.GetProperty("sku").GetString() ?? $"AUTO-{id:N}";
-        product.Name = payload.GetProperty("name_ar").GetString() ?? throw new InvalidOperationException("اسم الصنف مفقود.");
-        product.Unit = payload.GetProperty("unit").GetString() ?? throw new InvalidOperationException("وحدة الصنف مفقودة.");
-        product.Kind = payload.TryGetProperty("kind", out var kind) ? kind.GetString() ?? "PRODUCT" : "PRODUCT";
+        product.Sku = sku; product.Name = name; product.Unit = unit; product.Kind = "PRODUCT";
         var priceSite = payload.TryGetProperty("price_site_id", out var publishedSite) ? publishedSite.GetGuid()
             : payload.TryGetProperty("site_id", out var originatingSite) ? originatingSite.GetGuid() : Guid.Empty;
-        if (product.Kind == "PRODUCT" && priceSite == kitchenSiteId
+        if (priceSite == kitchenSiteId
             && payload.TryGetProperty("retail_price_minor", out var basePrice)) product.BasePriceMinor = basePrice.GetInt64();
-        product.QuantityScale = payload.GetProperty("quantity_scale").GetInt32();
-        product.Active = !payload.TryGetProperty("active", out var active) || active.GetBoolean();
+        product.QuantityScale = quantityScale;
+        product.Active = isActive;
         product.Version = version; product.UpdatedAtUtc = DateTimeOffset.UtcNow;
-        if (product.Kind == "INGREDIENT")
+    }
+
+    private static async Task ApplyCatalogArchiveAsync(KitchenDbContext db, JsonElement payload)
+    {
+        var itemId = payload.GetProperty("item_id").GetGuid();
+        var product = await db.Products.FindAsync(itemId);
+        if (product is not null) product.Active = false;
+        var ingredient = await db.Ingredients.FindAsync(itemId);
+        if (ingredient is not null) ingredient.Active = false;
+    }
+
+    private static async Task ApplyRecipeAsync(KitchenDbContext db, JsonElement payload, CancellationToken cancellationToken)
+    {
+        var productId = payload.GetProperty("product_item_id").GetGuid();
+        var version = payload.GetProperty("version").GetInt32();
+        var recipe = await db.Recipes.Include(x => x.Components)
+            .SingleOrDefaultAsync(x => x.ProductItemId == productId, cancellationToken);
+        if (recipe is not null && version <= recipe.Version) return;
+        if (recipe is null)
         {
-            var balance = await db.Ingredients.FindAsync(id);
-            if (balance is null) db.Ingredients.Add(new KitchenIngredientBalance { ItemId = id, Name = product.Name, Unit = product.Unit, QuantityScale = product.QuantityScale, Version = version });
-            else { balance.Name = product.Name; balance.Unit = product.Unit; balance.QuantityScale = product.QuantityScale; balance.Version = Math.Max(balance.Version, version); }
+            recipe = new KitchenRecipeRecord { ProductItemId = productId };
+            db.Recipes.Add(recipe);
         }
+        else
+        {
+            db.RecipeComponents.RemoveRange(recipe.Components);
+            recipe.Components.Clear();
+        }
+        recipe.OutputScaled = ParseInteger(payload.GetProperty("output_scaled"));
+        recipe.Version = version;
+        foreach (var component in payload.GetProperty("components").EnumerateArray())
+            recipe.Components.Add(new KitchenRecipeComponentRecord
+            {
+                Id = Guid.NewGuid(),
+                ProductItemId = productId,
+                IngredientItemId = component.GetProperty("ingredient_item_id").GetGuid(),
+                QuantityScaled = ParseInteger(component.GetProperty("quantity_scaled")),
+            });
+    }
+
+    private static async Task ApplyCafeCustomerEventAsync(KitchenDbContext db, string eventType, JsonElement payload,
+        CancellationToken cancellationToken)
+    {
+        var customerId = payload.GetProperty("customer_id").GetGuid();
+        var incomingVersion = payload.TryGetProperty("version", out var versionValue) ? versionValue.GetInt32() : 1;
+        var customer = db.CafeCustomers.Local.FirstOrDefault(x => x.Id == customerId);
+        if (customer is null)
+            customer = await db.CafeCustomers.Include(x => x.Prices)
+                .SingleOrDefaultAsync(x => x.Id == customerId, cancellationToken);
+        if (customer is null)
+        {
+            if (eventType != "cafe_customer.created") return;
+            customer = new KitchenCafeCustomer { Id = customerId, Version = 0 };
+            db.CafeCustomers.Add(customer);
+        }
+        if (eventType == "cafe_customer.archived")
+        {
+            if (incomingVersion < customer.Version) return;
+            customer.Version = incomingVersion;
+            customer.Active = false;
+            customer.HiddenLocally = true;
+            return;
+        }
+        if (incomingVersion < customer.Version) return;
+        if (eventType is "cafe_customer.created" or "cafe_customer.updated")
+        {
+            customer.Name = payload.GetProperty("name").GetString() ?? customer.Name;
+            customer.Contact = payload.TryGetProperty("phone", out var phone) ? phone.GetString() ?? "" : customer.Contact;
+            customer.Notes = payload.TryGetProperty("notes", out var notes) ? notes.GetString() ?? "" : customer.Notes;
+            customer.Active = true;
+            customer.HiddenLocally = false;
+            customer.Version = incomingVersion;
+        }
+        if (!payload.TryGetProperty("prices", out var prices) || prices.ValueKind != JsonValueKind.Array) return;
+        var rows = prices.EnumerateArray().ToArray();
+        var productIds = await db.Products.Where(x => x.Active && x.Kind == "PRODUCT")
+            .Select(x => x.Id).ToListAsync(cancellationToken);
+        var validProducts = productIds.ToHashSet();
+        db.CafePrices.RemoveRange(customer.Prices);
+        customer.Prices.Clear();
+        foreach (var row in rows)
+        {
+            var itemId = row.GetProperty("item_id").GetGuid();
+            if (!validProducts.Contains(itemId)) continue;
+            customer.Prices.Add(new KitchenCafePrice
+            {
+                CustomerId = customerId,
+                ItemId = itemId,
+                UnitPriceMinor = ParseInteger(row.GetProperty("unit_price_minor"), true),
+                Version = incomingVersion,
+            });
+        }
+        customer.Version = Math.Max(customer.Version, incomingVersion);
     }
 
     public async Task<KitchenCafeCustomer> SaveCafeAsync(Guid? customerId, int? expectedVersion,
-        string name, string contact, CancellationToken cancellationToken = default)
+        string name, string contact, IReadOnlyDictionary<Guid, long>? prices = null, CancellationToken cancellationToken = default)
     {
         name = name.Trim(); contact = contact.Trim();
         if (name.Length is < 1 or > 200 || contact.Length > 200)
@@ -472,9 +833,14 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
                 foreach (var product in products) cafe.Prices.Add(new KitchenCafePrice { CustomerId = cafe.Id,
                     ItemId = product.Id, UnitPriceMinor = product.BasePriceMinor, Version = 1 });
             }
+            if (prices is not null)
+            {
+                foreach (var price in cafe.Prices)
+                    if (prices.TryGetValue(price.ItemId, out var value)) { price.UnitPriceMinor = value; price.Version = cafe.Version; }
+            }
             var payload = new { customer_id = cafe.Id, site_id = configuration.SiteId, name = cafe.Name,
                 phone = cafe.Contact, notes = cafe.Notes, kind = "Cafe", version = cafe.Version,
-                prices = isNew ? cafe.Prices.Select(x => new { item_id = x.ItemId, unit_price_minor = x.UnitPriceMinor }).ToArray() : null };
+                prices = cafe.Prices.Select(x => new { item_id = x.ItemId, unit_price_minor = x.UnitPriceMinor }).ToArray() };
             var eventType = isNew ? "cafe_customer.created" : "cafe_customer.updated";
             var contractEvent = ContractEventFactory.Create(eventId, configuration.NextDeviceSequence, eventType, now, payload);
             using var document = JsonDocument.Parse(contractEvent.PayloadJson);
@@ -502,17 +868,23 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
             var product = await db.Products.FindAsync([productId], cancellationToken);
             if (product is null || !product.Active || product.Kind != "PRODUCT") throw new InvalidOperationException("اختر منتجاً صالحاً.");
             var ingredientIds = components.Keys.ToArray();
-            var ingredientCount = await db.Products.CountAsync(x => ingredientIds.Contains(x.Id) && x.Active && x.Kind == "INGREDIENT", cancellationToken);
+            var ingredientCount = await db.Ingredients.CountAsync(x => ingredientIds.Contains(x.ItemId) && x.Active, cancellationToken);
             if (ingredientCount != components.Count) throw new InvalidOperationException("الوصفة تحتوي على خامة غير متاحة.");
-            var recipe = await db.Recipes.Include(x => x.Components).SingleOrDefaultAsync(x => x.ProductItemId == productId, cancellationToken);
+            var recipe = await db.Recipes.AsNoTracking().SingleOrDefaultAsync(x => x.ProductItemId == productId, cancellationToken);
             if ((recipe?.Version ?? 0) != expectedVersion) throw new InvalidOperationException("تغيرت الوصفة؛ افتحها من جديد.");
-            if (recipe is null) { recipe = new KitchenRecipeRecord { ProductItemId = productId }; db.Recipes.Add(recipe); }
-            else { db.RecipeComponents.RemoveRange(recipe.Components); recipe.Components.Clear(); }
-            recipe.OutputScaled = outputScaled; recipe.Version = expectedVersion + 1;
-            foreach (var component in components) recipe.Components.Add(new KitchenRecipeComponentRecord {
+            var nextVersion = expectedVersion + 1;
+            if (recipe is null)
+                db.Recipes.Add(new KitchenRecipeRecord { ProductItemId = productId, OutputScaled = outputScaled, Version = nextVersion });
+            else
+            {
+                await db.RecipeComponents.Where(x => x.ProductItemId == productId).ExecuteDeleteAsync(cancellationToken);
+                await db.Recipes.Where(x => x.ProductItemId == productId && x.Version == expectedVersion)
+                    .ExecuteUpdateAsync(setters => setters.SetProperty(x => x.OutputScaled, outputScaled).SetProperty(x => x.Version, nextVersion), cancellationToken);
+            }
+            foreach (var component in components) db.RecipeComponents.Add(new KitchenRecipeComponentRecord {
                 Id = Guid.NewGuid(), ProductItemId = productId, IngredientItemId = component.Key, QuantityScaled = component.Value });
             var eventId = Guid.NewGuid(); var now = DateTimeOffset.UtcNow;
-            var payload = new { product_item_id = productId, output_scaled = outputScaled.ToString(), version = recipe.Version,
+            var payload = new { product_item_id = productId, output_scaled = outputScaled.ToString(), version = nextVersion,
                 components = components.Select(x => new { ingredient_item_id = x.Key, quantity_scaled = x.Value.ToString() }).ToArray() };
             var contractEvent = ContractEventFactory.Create(eventId, configuration.NextDeviceSequence, "recipe.updated", now, payload);
             using var document = JsonDocument.Parse(contractEvent.PayloadJson);
@@ -537,18 +909,42 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
         return receipts.OrderByDescending(x => x.CountedAtUtc).ToArray();
     }
 
-    public async Task HideCafeCustomerAsync(Guid customerId)
+    public async Task ArchiveCafeCustomerAsync(Guid customerId, CancellationToken cancellationToken = default)
     {
         if (customerId == Guid.Empty) throw new BusinessRuleException("CAFE_REQUIRED", "اختر الكافيه أولاً.");
-        await store.WriteLock.WaitAsync();
+        await store.WriteLock.WaitAsync(cancellationToken);
         try
         {
             await using var db = store.Open();
-            var customer = await db.CafeCustomers.SingleOrDefaultAsync(x => x.Id == customerId)
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+            var customer = await db.CafeCustomers.SingleOrDefaultAsync(x => x.Id == customerId, cancellationToken)
                 ?? throw new BusinessRuleException("CAFE_NOT_FOUND", "الكافيه غير موجود.");
+            if (!customer.Active) return;
+            var configuration = await db.Configuration.SingleAsync(cancellationToken);
+            var now = DateTimeOffset.UtcNow;
+            var eventId = Guid.NewGuid();
+            var nextVersion = customer.Version + 1;
+            var payload = new { customer_id = customer.Id, site_id = configuration.SiteId, version = nextVersion };
+            var contractEvent = ContractEventFactory.Create(eventId, configuration.NextDeviceSequence,
+                "cafe_customer.archived", now, payload);
+            using var document = JsonDocument.Parse(contractEvent.PayloadJson);
+            var upload = new SyncUploadEvent(contractEvent.Id, contractEvent.DeviceSequence, contractEvent.EventType,
+                contractEvent.SchemaVersion, contractEvent.OccurredAtUtc.ToString("O"), document.RootElement.Clone(), [], contractEvent.ContentHash);
+            db.Outbox.Add(new KitchenOutbox
+            {
+                EventId = eventId,
+                RequestId = customer.Id,
+                Sequence = configuration.NextDeviceSequence,
+                UploadJson = JsonSerializer.Serialize(upload),
+                AppliedLocally = true,
+                NextAttemptAtUtc = now,
+            });
             customer.HiddenLocally = true;
             customer.Active = false;
-            await db.SaveChangesAsync();
+            customer.Version = nextVersion;
+            configuration.NextDeviceSequence++;
+            await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
         }
         finally { store.WriteLock.Release(); }
     }
@@ -569,13 +965,49 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
             x.QuantityScale, x.QuantityScaled, x.UnitPriceMinor, x.LineTotalMinor)).ToArray());
 
     public Task ReceiveIngredientsAsync(IReadOnlyDictionary<Guid, long> quantities, string reason) => PostIngredientMovementAsync("ingredient.received", quantities, reason);
-    public Task ReceiveIngredientPurchaseAsync(Guid ingredientId, long quantityScaled, long totalCostMinor, string reason)
+    public async Task ReceiveIngredientPurchaseAsync(Guid ingredientId, long quantityScaled, long totalCostMinor, string reason)
     {
         if (ingredientId == Guid.Empty || quantityScaled <= 0 || totalCostMinor <= 0)
             throw new InvalidOperationException("اختر خامة، كمية وسعر شراء أكبر من الصفر.");
-        return PostIngredientMovementAsync("ingredient.received",
+        await using (var db = store.Open())
+        {
+            var ingredient = await db.Ingredients.SingleAsync(x => x.ItemId == ingredientId && x.Active);
+            if (ingredient.PurchaseUnitCostMicros == 0)
+            {
+                ingredient.PurchaseUnitCostMicros = checked((long)decimal.Round((decimal)totalCostMinor * 10_000m
+                    * ingredient.QuantityScale / quantityScaled, 0, MidpointRounding.AwayFromZero));
+                await db.SaveChangesAsync();
+            }
+        }
+        await PostIngredientMovementAsync("ingredient.received",
             new Dictionary<Guid, long> { [ingredientId] = quantityScaled }, reason,
             new Dictionary<Guid, long> { [ingredientId] = totalCostMinor });
+    }
+    public async Task<long> ReceiveIngredientPurchaseAtSavedCostAsync(Guid ingredientId, long quantityScaled, string reason)
+    {
+        await using var db = store.Open();
+        var ingredient = await db.Ingredients.AsNoTracking().SingleOrDefaultAsync(x => x.ItemId == ingredientId && x.Active)
+            ?? throw new InvalidOperationException("الخامة غير موجودة.");
+        if (ingredient.PurchaseUnitCostMicros <= 0) throw new InvalidOperationException("حدّث سعر الخامة أولاً.");
+        var totalCostMinor = checked((long)decimal.Round((decimal)quantityScaled * ingredient.PurchaseUnitCostMicros
+            / ingredient.QuantityScale / 10_000m, 0, MidpointRounding.AwayFromZero));
+        await ReceiveIngredientPurchaseAsync(ingredientId, quantityScaled, totalCostMinor, reason);
+        return totalCostMinor;
+    }
+    public async Task UpdateIngredientPurchaseUnitCostAsync(Guid ingredientId, long unitCostMicros, CancellationToken cancellationToken = default)
+    {
+        if (unitCostMicros <= 0) throw new InvalidOperationException("أدخل تكلفة وحدة أكبر من الصفر.");
+        await store.WriteLock.WaitAsync(cancellationToken);
+        try
+        {
+            await using var db = store.Open();
+            var ingredient = await db.Ingredients.SingleOrDefaultAsync(x => x.ItemId == ingredientId && x.Active, cancellationToken)
+                ?? throw new InvalidOperationException("الخامة غير موجودة.");
+            ingredient.PurchaseUnitCostMicros = unitCostMicros;
+            ingredient.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        finally { store.WriteLock.Release(); }
     }
     public Task RecordWasteAsync(IReadOnlyDictionary<Guid, long> quantities, string reason) => PostIngredientMovementAsync("ingredient.waste", quantities, reason);
     private async Task PostIngredientMovementAsync(string eventType, IReadOnlyDictionary<Guid, long> quantities, string reason,
@@ -588,7 +1020,7 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
         {
             await using var db = store.Open(); await using var transaction = await db.Database.BeginTransactionAsync();
             var configuration = await db.Configuration.SingleAsync();
-            var balances = await db.Ingredients.Where(x => selected.Select(y => y.Key).Contains(x.ItemId)).ToDictionaryAsync(x => x.ItemId);
+            var balances = await db.Ingredients.Where(x => x.Active && selected.Select(y => y.Key).Contains(x.ItemId)).ToDictionaryAsync(x => x.ItemId);
             if (balances.Count != selected.Length || eventType == "ingredient.waste" && selected.Any(x => balances[x.Key].QuantityScaled < x.Value)) throw new InvalidOperationException("رصيد الخامات لا يسمح بهذه العملية.");
             var eventId = Guid.NewGuid(); var now = DateTimeOffset.UtcNow;
             var payload = new { operation_id = eventId, reason = reason.Trim(), lines = selected.Select(x => new {
@@ -605,7 +1037,7 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
                     : CostForUse(balance.InventoryCostMinor, balance.QuantityScaled, input.Value);
                 balance.QuantityScaled = checked(balance.QuantityScaled + multiplier * input.Value);
                 balance.InventoryCostMinor = checked(balance.InventoryCostMinor + multiplier * cost);
-                balance.Version++;
+                balance.StockVersion++;
                 var line = upload.Payload.GetProperty("lines").EnumerateArray().Single(x => x.GetProperty("item_id").GetGuid() == input.Key);
                 db.IngredientMovements.Add(new KitchenIngredientMovement { Id = line.GetProperty("line_id").GetGuid(), ShipmentId = upload.Id,
                     IngredientItemId = input.Key, Kind = eventType == "ingredient.received" ? "RECEIPT" : "WASTE", Reason = reason.Trim(),
@@ -622,7 +1054,7 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
         try
         {
             await using var db = store.Open(); await using var transaction = await db.Database.BeginTransactionAsync(); var configuration = await db.Configuration.SingleAsync();
-            var balances = await db.Ingredients.ToListAsync(); if (balances.Count == 0 || balances.Any(x => !counts.ContainsKey(x.ItemId) || counts[x.ItemId] < 0)) throw new InvalidOperationException("يجب عد كل الخامات بكميات صحيحة.");
+            var balances = await db.Ingredients.Where(x => x.Active).ToListAsync(); if (balances.Count == 0 || balances.Any(x => !counts.ContainsKey(x.ItemId) || counts[x.ItemId] < 0)) throw new InvalidOperationException("يجب عد كل الخامات بكميات صحيحة.");
             var now = DateTimeOffset.UtcNow; var eventId = Guid.NewGuid(); var cairo = TimeZoneInfo.FindSystemTimeZoneById(OperatingSystem.IsWindows() ? "Egypt Standard Time" : "Africa/Cairo"); var date = TimeZoneInfo.ConvertTime(now, cairo).Date.ToString("yyyy-MM-dd");
             var todayWaste = await db.IngredientMovements.Where(x => x.Kind == "WASTE" && x.OccurredAtUtc >= now.Date).GroupBy(x => x.IngredientItemId).Select(x => new { x.Key, Total = -x.Sum(y => y.DeltaScaled) }).ToDictionaryAsync(x => x.Key, x => x.Total);
             var payload = new { count_id = eventId, business_date = date, lines = balances.Select(x => new { line_id = Guid.NewGuid(), item_id = x.ItemId, actual_scaled = counts[x.ItemId].ToString(), recorded_waste_scaled = todayWaste.GetValueOrDefault(x.ItemId).ToString() }).ToArray() };
@@ -633,7 +1065,7 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
             {
                 var actual = counts[balance.ItemId]; var delta = actual - balance.QuantityScaled;
                 var cost = delta < 0 ? CostForUse(balance.InventoryCostMinor, balance.QuantityScaled, -delta) : 0;
-                balance.InventoryCostMinor -= cost; balance.QuantityScaled = actual; balance.Version++;
+                balance.InventoryCostMinor -= cost; balance.QuantityScaled = actual; balance.StockVersion++;
                 var line = upload.Payload.GetProperty("lines").EnumerateArray().Single(x => x.GetProperty("item_id").GetGuid() == balance.ItemId);
                 db.IngredientMovements.Add(new KitchenIngredientMovement { Id = line.GetProperty("line_id").GetGuid(), ShipmentId = upload.Id,
                     IngredientItemId = balance.ItemId, Kind = "COUNT", Reason = "جرد نهاية اليوم", DeltaScaled = delta, CostMinor = cost, OccurredAtUtc = now });
@@ -705,7 +1137,7 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
         {
             var itemId = row.GetProperty("ingredient_item_id").GetGuid(); var quantity = ParseInteger(row.GetProperty("quantity_scaled")); var balance = await db.Ingredients.FindAsync(itemId);
             if (balance is null || balance.QuantityScaled < quantity) throw new InvalidOperationException("رصيد الخامات المحلي تغير بعد إرسال الشحنة؛ أوقف التشغيل وراجع الإدارة.");
-            balance.QuantityScaled -= quantity; balance.Version++;
+            balance.QuantityScaled -= quantity; balance.StockVersion++;
             var cost = row.TryGetProperty("cost_minor", out var costValue) ? ParseInteger(costValue, true) : 0;
             balance.InventoryCostMinor -= cost;
             db.IngredientMovements.Add(new KitchenIngredientMovement { Id = row.TryGetProperty("line_id", out var lineId) ? lineId.GetGuid() : Guid.NewGuid(),
@@ -716,9 +1148,9 @@ public sealed class KitchenSyncService(HttpClient http, KitchenStore store)
         request.Status = request.Lines.All(x => x.SentScaled >= x.RequestedScaled) ? "FULFILLED" : "PARTIAL";
         } else if (!pending.AppliedLocally && upload.EventType is "ingredient.received" or "ingredient.waste") {
             var multiplier = upload.EventType == "ingredient.received" ? 1L : -1L; var reason = upload.Payload.GetProperty("reason").GetString()!;
-            foreach (var row in upload.Payload.GetProperty("lines").EnumerateArray()) { var itemId = row.GetProperty("item_id").GetGuid(); var quantity = ParseInteger(row.GetProperty("quantity_scaled")); var balance = await db.Ingredients.FindAsync(itemId) ?? throw new InvalidOperationException("الخامة غير موجودة محلياً."); var cost = multiplier > 0 ? row.TryGetProperty("total_cost_minor", out var costValue) ? ParseInteger(costValue, true) : 0 : CostForUse(balance.InventoryCostMinor, balance.QuantityScaled, quantity); balance.QuantityScaled = checked(balance.QuantityScaled + multiplier * quantity); balance.InventoryCostMinor = checked(balance.InventoryCostMinor + multiplier * cost); balance.Version++; db.IngredientMovements.Add(new KitchenIngredientMovement { Id = row.GetProperty("line_id").GetGuid(), ShipmentId = upload.Id, IngredientItemId = itemId, Kind = upload.EventType == "ingredient.received" ? "RECEIPT" : "WASTE", Reason = reason, DeltaScaled = multiplier * quantity, CostMinor = cost, OccurredAtUtc = DateTimeOffset.Parse(upload.OccurredAt) }); }
+            foreach (var row in upload.Payload.GetProperty("lines").EnumerateArray()) { var itemId = row.GetProperty("item_id").GetGuid(); var quantity = ParseInteger(row.GetProperty("quantity_scaled")); var balance = await db.Ingredients.FindAsync(itemId) ?? throw new InvalidOperationException("الخامة غير موجودة محلياً."); var cost = multiplier > 0 ? row.TryGetProperty("total_cost_minor", out var costValue) ? ParseInteger(costValue, true) : 0 : CostForUse(balance.InventoryCostMinor, balance.QuantityScaled, quantity); balance.QuantityScaled = checked(balance.QuantityScaled + multiplier * quantity); balance.InventoryCostMinor = checked(balance.InventoryCostMinor + multiplier * cost); balance.StockVersion++; db.IngredientMovements.Add(new KitchenIngredientMovement { Id = row.GetProperty("line_id").GetGuid(), ShipmentId = upload.Id, IngredientItemId = itemId, Kind = upload.EventType == "ingredient.received" ? "RECEIPT" : "WASTE", Reason = reason, DeltaScaled = multiplier * quantity, CostMinor = cost, OccurredAtUtc = DateTimeOffset.Parse(upload.OccurredAt) }); }
         } else if (!pending.AppliedLocally && upload.EventType == "ingredient.counted") {
-            foreach (var row in upload.Payload.GetProperty("lines").EnumerateArray()) { var itemId = row.GetProperty("item_id").GetGuid(); var actual = ParseInteger(row.GetProperty("actual_scaled"), true); var balance = await db.Ingredients.FindAsync(itemId) ?? throw new InvalidOperationException("الخامة غير موجودة محلياً."); var delta = actual - balance.QuantityScaled; var cost = delta < 0 ? CostForUse(balance.InventoryCostMinor, balance.QuantityScaled, -delta) : 0; balance.InventoryCostMinor -= cost; balance.QuantityScaled = actual; balance.Version++; db.IngredientMovements.Add(new KitchenIngredientMovement { Id = row.GetProperty("line_id").GetGuid(), ShipmentId = upload.Id, IngredientItemId = itemId, Kind = "COUNT", Reason = "جرد نهاية اليوم", DeltaScaled = delta, CostMinor = cost, OccurredAtUtc = DateTimeOffset.Parse(upload.OccurredAt) }); }
+            foreach (var row in upload.Payload.GetProperty("lines").EnumerateArray()) { var itemId = row.GetProperty("item_id").GetGuid(); var actual = ParseInteger(row.GetProperty("actual_scaled"), true); var balance = await db.Ingredients.FindAsync(itemId) ?? throw new InvalidOperationException("الخامة غير موجودة محلياً."); var delta = actual - balance.QuantityScaled; var cost = delta < 0 ? CostForUse(balance.InventoryCostMinor, balance.QuantityScaled, -delta) : 0; balance.InventoryCostMinor -= cost; balance.QuantityScaled = actual; balance.StockVersion++; db.IngredientMovements.Add(new KitchenIngredientMovement { Id = row.GetProperty("line_id").GetGuid(), ShipmentId = upload.Id, IngredientItemId = itemId, Kind = "COUNT", Reason = "جرد نهاية اليوم", DeltaScaled = delta, CostMinor = cost, OccurredAtUtc = DateTimeOffset.Parse(upload.OccurredAt) }); }
         }
         if (response.NextExpectedSequence <= pending.Sequence) throw new InvalidOperationException("استجابة تسلسل المزامنة غير صالحة.");
         configuration.NextDeviceSequence = Math.Max(configuration.NextDeviceSequence, response.NextExpectedSequence);

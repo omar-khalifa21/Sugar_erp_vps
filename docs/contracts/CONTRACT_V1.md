@@ -22,7 +22,7 @@ Permissions in v1:
 | Actor | Scope |
 |---|---|
 | Admin | All sites, users, catalog, revenue, cafe, kitchen, conflicts, reports, releases, backup status, and private audit |
-| Branch Type 1 writer | Own Type 1 operations; read-only freshness-marked branch stock projections; no cafe issue or conflict decision |
+| Branch Type 1 writer | Own Type 1 operations including cafe/customer profiles, custom orders, collections, and cafe issue from SALEABLE stock; read-only freshness-marked branch stock projections; no conflict decision |
 | Branch Type 2 writer | Own Type 2 operations including freezer/display and cafe issue; no conflict decision |
 | Kitchen writer | Own kitchen ingredients, dispatch, waste, counts, and cafe issue; no conflict decision |
 

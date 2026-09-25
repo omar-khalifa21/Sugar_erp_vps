@@ -106,7 +106,23 @@ public sealed class KitchenReturnRecord
     public string PayloadJson { get; set; } = "";
     public DateTimeOffset DispatchedAtUtc { get; set; }
 }
-public sealed class KitchenIngredientBalance { public Guid ItemId { get; set; } public string Name { get; set; } = ""; public string Unit { get; set; } = ""; public int QuantityScale { get; set; } = 1; public long QuantityScaled { get; set; } public long InventoryCostMinor { get; set; } public int Version { get; set; } }
+public sealed class KitchenIngredientBalance
+{
+    public Guid ItemId { get; set; }
+    public string Sku { get; set; } = "";
+    public string Name { get; set; } = "";
+    public string Unit { get; set; } = "";
+    public int QuantityScale { get; set; } = 1;
+    public long QuantityScaled { get; set; }
+    public long InventoryCostMinor { get; set; }
+    public long PurchaseUnitCostMicros { get; set; }
+    public bool Active { get; set; } = true;
+    // Catalog metadata and stock are independently versioned on the server.
+    // Version is the catalog version; StockVersion tracks the KITCHEN balance.
+    public int Version { get; set; }
+    public int StockVersion { get; set; }
+    public DateTimeOffset UpdatedAtUtc { get; set; }
+}
 public sealed class KitchenRecipeRecord { public Guid ProductItemId { get; set; } public long OutputScaled { get; set; } public int Version { get; set; } public List<KitchenRecipeComponentRecord> Components { get; set; } = []; }
 public sealed class KitchenRecipeComponentRecord { public Guid Id { get; set; } public Guid ProductItemId { get; set; } public Guid IngredientItemId { get; set; } public long QuantityScaled { get; set; } public KitchenRecipeRecord Recipe { get; set; } = null!; }
 public sealed class KitchenIngredientMovement { public Guid Id { get; set; } public Guid ShipmentId { get; set; } public Guid IngredientItemId { get; set; } public string Kind { get; set; } = "DISPATCH"; public string Reason { get; set; } = ""; public long DeltaScaled { get; set; } public long CostMinor { get; set; } public string RecipeSnapshotJson { get; set; } = ""; public DateTimeOffset OccurredAtUtc { get; set; } }
@@ -137,7 +153,9 @@ public sealed class KitchenDbContext(DbContextOptions<KitchenDbContext> options)
         model.Entity<KitchenRequestLineRecord>().HasOne(x => x.Request).WithMany(x => x.Lines).HasForeignKey(x => x.RequestId).OnDelete(DeleteBehavior.Restrict);
         model.Entity<KitchenInbox>().ToTable("inbox").HasKey(x => x.EventId);
         model.Entity<KitchenOutbox>().ToTable("outbox").HasKey(x => x.EventId);
-        model.Entity<KitchenOutbox>().HasIndex(x => x.Sequence).IsUnique();
+        // Sequence is unique only within a device stream. A safe re-enrollment
+        // starts a new stream at 1 while acknowledged historical rows remain.
+        model.Entity<KitchenOutbox>().HasIndex(x => x.Sequence);
         model.Entity<KitchenReceiptRecord>().ToTable("shipment_receipts").HasKey(x => x.EventId);
         model.Entity<KitchenReceiptRecord>().HasIndex(x => x.ReceiptId).IsUnique();
         model.Entity<KitchenReturnRecord>().ToTable("kitchen_returns").HasKey(x => x.EventId);
@@ -189,39 +207,79 @@ public sealed class KitchenStore
         await using var db = Open();
         await db.Database.EnsureCreatedAsync();
         // Additive upgrade for Kitchen 0.1 databases; never replace enrolled data.
-        await db.Database.ExecuteSqlRawAsync("CREATE TABLE IF NOT EXISTS outbox (EventId TEXT NOT NULL PRIMARY KEY, RequestId TEXT NOT NULL, Sequence INTEGER NOT NULL, UploadJson TEXT NOT NULL, Acknowledged INTEGER NOT NULL DEFAULT 0, AppliedLocally INTEGER NOT NULL DEFAULT 0, Attempts INTEGER NOT NULL DEFAULT 0, NextAttemptAtUtc TEXT NOT NULL DEFAULT '0001-01-01T00:00:00+00:00', LastErrorCode TEXT NULL, LastErrorMessage TEXT NULL, PermanentlyFailed INTEGER NOT NULL DEFAULT 0); CREATE UNIQUE INDEX IF NOT EXISTS IX_outbox_Sequence ON outbox(Sequence);");
+        await db.Database.ExecuteSqlRawAsync("CREATE TABLE IF NOT EXISTS outbox (EventId TEXT NOT NULL PRIMARY KEY, RequestId TEXT NOT NULL, Sequence INTEGER NOT NULL, UploadJson TEXT NOT NULL, Acknowledged INTEGER NOT NULL DEFAULT 0, AppliedLocally INTEGER NOT NULL DEFAULT 0, Attempts INTEGER NOT NULL DEFAULT 0, NextAttemptAtUtc TEXT NOT NULL DEFAULT '0001-01-01T00:00:00+00:00', LastErrorCode TEXT NULL, LastErrorMessage TEXT NULL, PermanentlyFailed INTEGER NOT NULL DEFAULT 0); CREATE INDEX IF NOT EXISTS IX_outbox_Sequence ON outbox(Sequence);");
         await db.Database.ExecuteSqlRawAsync("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;");
         await db.Database.ExecuteSqlRawAsync("CREATE TABLE IF NOT EXISTS shipment_receipts (EventId TEXT NOT NULL PRIMARY KEY, ShipmentId TEXT NOT NULL, ReceiptId TEXT NOT NULL, BranchSiteId TEXT NOT NULL, Status TEXT NOT NULL, PayloadJson TEXT NOT NULL, CountedAtUtc TEXT NOT NULL); CREATE UNIQUE INDEX IF NOT EXISTS IX_shipment_receipts_ReceiptId ON shipment_receipts(ReceiptId);");
         await db.Database.ExecuteSqlRawAsync("CREATE TABLE IF NOT EXISTS kitchen_returns (EventId TEXT NOT NULL PRIMARY KEY, ReturnId TEXT NOT NULL, BranchSiteId TEXT NOT NULL, Reference TEXT NOT NULL, PayloadJson TEXT NOT NULL, DispatchedAtUtc TEXT NOT NULL); CREATE UNIQUE INDEX IF NOT EXISTS IX_kitchen_returns_ReturnId ON kitchen_returns(ReturnId);");
         await db.Database.ExecuteSqlRawAsync("CREATE TABLE IF NOT EXISTS ingredient_balances (ItemId TEXT NOT NULL PRIMARY KEY, Name TEXT NOT NULL, Unit TEXT NOT NULL, QuantityScale INTEGER NOT NULL, QuantityScaled INTEGER NOT NULL, Version INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS recipes (ProductItemId TEXT NOT NULL PRIMARY KEY, OutputScaled INTEGER NOT NULL, Version INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS recipe_components (Id TEXT NOT NULL PRIMARY KEY, ProductItemId TEXT NOT NULL, IngredientItemId TEXT NOT NULL, QuantityScaled INTEGER NOT NULL, FOREIGN KEY(ProductItemId) REFERENCES recipes(ProductItemId) ON DELETE RESTRICT); CREATE UNIQUE INDEX IF NOT EXISTS IX_recipe_components_ProductItemId_IngredientItemId ON recipe_components(ProductItemId,IngredientItemId); CREATE TABLE IF NOT EXISTS ingredient_movements (Id TEXT NOT NULL PRIMARY KEY, ShipmentId TEXT NOT NULL, IngredientItemId TEXT NOT NULL, Kind TEXT NOT NULL DEFAULT 'DISPATCH', Reason TEXT NOT NULL DEFAULT '', DeltaScaled INTEGER NOT NULL, RecipeSnapshotJson TEXT NOT NULL, OccurredAtUtc TEXT NOT NULL); CREATE UNIQUE INDEX IF NOT EXISTS IX_ingredient_movements_ShipmentId_IngredientItemId ON ingredient_movements(ShipmentId,IngredientItemId);");
         await db.Database.ExecuteSqlRawAsync("CREATE TABLE IF NOT EXISTS products (Id TEXT NOT NULL PRIMARY KEY, Name TEXT NOT NULL, Unit TEXT NOT NULL, QuantityScale INTEGER NOT NULL, Active INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS cafe_customers (Id TEXT NOT NULL PRIMARY KEY, Name TEXT NOT NULL, Contact TEXT NOT NULL, Notes TEXT NOT NULL, Active INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS cafe_prices (CustomerId TEXT NOT NULL, ItemId TEXT NOT NULL, UnitPriceMinor INTEGER NOT NULL, Version INTEGER NOT NULL, PRIMARY KEY(CustomerId,ItemId), FOREIGN KEY(CustomerId) REFERENCES cafe_customers(Id) ON DELETE RESTRICT, FOREIGN KEY(ItemId) REFERENCES products(Id) ON DELETE RESTRICT); CREATE TABLE IF NOT EXISTS custom_orders (Id TEXT NOT NULL PRIMARY KEY, CustomerId TEXT NOT NULL, OrderNumber TEXT NOT NULL, CustomerName TEXT NOT NULL, CustomerPhone TEXT NOT NULL, Description TEXT NOT NULL, DueAtUtc TEXT NOT NULL, TotalMinor INTEGER NOT NULL, PaidMinor INTEGER NOT NULL, Status TEXT NOT NULL, Version INTEGER NOT NULL, CreatedAtUtc TEXT NOT NULL, UpdatedAtUtc TEXT NOT NULL); CREATE UNIQUE INDEX IF NOT EXISTS IX_custom_orders_OrderNumber ON custom_orders(OrderNumber); CREATE TABLE IF NOT EXISTS custom_order_lines (Id TEXT NOT NULL PRIMARY KEY, OrderId TEXT NOT NULL, ItemId TEXT NOT NULL, ItemName TEXT NOT NULL, Unit TEXT NOT NULL, QuantityScale INTEGER NOT NULL, QuantityScaled INTEGER NOT NULL, UnitPriceMinor INTEGER NOT NULL, LineTotalMinor INTEGER NOT NULL, FOREIGN KEY(OrderId) REFERENCES custom_orders(Id) ON DELETE RESTRICT);");
-        await AddColumnAsync(db, "ALTER TABLE ingredient_movements ADD COLUMN Kind TEXT NOT NULL DEFAULT 'DISPATCH'");
-        await AddColumnAsync(db, "ALTER TABLE ingredient_movements ADD COLUMN Reason TEXT NOT NULL DEFAULT ''");
-        await AddColumnAsync(db, "ALTER TABLE configuration ADD COLUMN SiteName TEXT NOT NULL DEFAULT 'المطبخ'");
-        await AddColumnAsync(db, "ALTER TABLE configuration ADD COLUMN PrinterName TEXT NOT NULL DEFAULT ''");
-        await AddColumnAsync(db, "ALTER TABLE configuration ADD COLUMN NextCustomOrderSequence INTEGER NOT NULL DEFAULT 1");
-        await AddColumnAsync(db, "ALTER TABLE outbox ADD COLUMN AppliedLocally INTEGER NOT NULL DEFAULT 0");
-        await AddColumnAsync(db, "ALTER TABLE outbox ADD COLUMN Attempts INTEGER NOT NULL DEFAULT 0");
-        await AddColumnAsync(db, "ALTER TABLE outbox ADD COLUMN NextAttemptAtUtc TEXT NOT NULL DEFAULT '0001-01-01T00:00:00+00:00'");
-        await AddColumnAsync(db, "ALTER TABLE outbox ADD COLUMN LastErrorCode TEXT NULL");
-        await AddColumnAsync(db, "ALTER TABLE outbox ADD COLUMN LastErrorMessage TEXT NULL");
-        await AddColumnAsync(db, "ALTER TABLE outbox ADD COLUMN PermanentlyFailed INTEGER NOT NULL DEFAULT 0");
-        await AddColumnAsync(db, "ALTER TABLE cafe_customers ADD COLUMN HiddenLocally INTEGER NOT NULL DEFAULT 0");
-        await AddColumnAsync(db, "ALTER TABLE products ADD COLUMN Sku TEXT NOT NULL DEFAULT ''");
-        await AddColumnAsync(db, "ALTER TABLE products ADD COLUMN Kind TEXT NOT NULL DEFAULT 'PRODUCT'");
-        await AddColumnAsync(db, "ALTER TABLE products ADD COLUMN Version INTEGER NOT NULL DEFAULT 1");
-        await AddColumnAsync(db, "ALTER TABLE products ADD COLUMN UpdatedAtUtc TEXT NOT NULL DEFAULT '0001-01-01T00:00:00+00:00'");
-        await AddColumnAsync(db, "ALTER TABLE products ADD COLUMN BasePriceMinor INTEGER NOT NULL DEFAULT 0");
-        await AddColumnAsync(db, "ALTER TABLE ingredient_balances ADD COLUMN InventoryCostMinor INTEGER NOT NULL DEFAULT 0");
-        await AddColumnAsync(db, "ALTER TABLE ingredient_movements ADD COLUMN CostMinor INTEGER NOT NULL DEFAULT 0");
-        await AddColumnAsync(db, "ALTER TABLE cafe_customers ADD COLUMN Version INTEGER NOT NULL DEFAULT 1");
+        await db.Database.ExecuteSqlRawAsync("CREATE TABLE IF NOT EXISTS kitchen_schema_migrations (Version INTEGER NOT NULL PRIMARY KEY, Name TEXT NOT NULL, AppliedAtUtc TEXT NOT NULL);");
+        await ApplyMigrationAsync(db, 2026092301, "durable-outbox-and-kitchen-settings", async () =>
+        {
+            await AddColumnAsync(db, "ALTER TABLE ingredient_movements ADD COLUMN Kind TEXT NOT NULL DEFAULT 'DISPATCH'");
+            await AddColumnAsync(db, "ALTER TABLE ingredient_movements ADD COLUMN Reason TEXT NOT NULL DEFAULT ''");
+            await AddColumnAsync(db, "ALTER TABLE configuration ADD COLUMN SiteName TEXT NOT NULL DEFAULT 'المطبخ'");
+            await AddColumnAsync(db, "ALTER TABLE configuration ADD COLUMN PrinterName TEXT NOT NULL DEFAULT ''");
+            await AddColumnAsync(db, "ALTER TABLE configuration ADD COLUMN NextCustomOrderSequence INTEGER NOT NULL DEFAULT 1");
+            await AddColumnAsync(db, "ALTER TABLE outbox ADD COLUMN AppliedLocally INTEGER NOT NULL DEFAULT 0");
+            await AddColumnAsync(db, "ALTER TABLE outbox ADD COLUMN Attempts INTEGER NOT NULL DEFAULT 0");
+            await AddColumnAsync(db, "ALTER TABLE outbox ADD COLUMN NextAttemptAtUtc TEXT NOT NULL DEFAULT '0001-01-01T00:00:00+00:00'");
+            await AddColumnAsync(db, "ALTER TABLE outbox ADD COLUMN LastErrorCode TEXT NULL");
+            await AddColumnAsync(db, "ALTER TABLE outbox ADD COLUMN LastErrorMessage TEXT NULL");
+            await AddColumnAsync(db, "ALTER TABLE outbox ADD COLUMN PermanentlyFailed INTEGER NOT NULL DEFAULT 0");
+            await AddColumnAsync(db, "ALTER TABLE cafe_customers ADD COLUMN HiddenLocally INTEGER NOT NULL DEFAULT 0");
+            await AddColumnAsync(db, "ALTER TABLE products ADD COLUMN Sku TEXT NOT NULL DEFAULT ''");
+            await AddColumnAsync(db, "ALTER TABLE products ADD COLUMN Kind TEXT NOT NULL DEFAULT 'PRODUCT'");
+            await AddColumnAsync(db, "ALTER TABLE products ADD COLUMN Version INTEGER NOT NULL DEFAULT 1");
+            await AddColumnAsync(db, "ALTER TABLE products ADD COLUMN UpdatedAtUtc TEXT NOT NULL DEFAULT '0001-01-01T00:00:00+00:00'");
+            await AddColumnAsync(db, "ALTER TABLE products ADD COLUMN BasePriceMinor INTEGER NOT NULL DEFAULT 0");
+        });
+        await ApplyMigrationAsync(db, 2026092302, "ingredient-cost-ledger", async () =>
+        {
+            await AddColumnAsync(db, "ALTER TABLE ingredient_balances ADD COLUMN InventoryCostMinor INTEGER NOT NULL DEFAULT 0");
+            await AddColumnAsync(db, "ALTER TABLE ingredient_movements ADD COLUMN CostMinor INTEGER NOT NULL DEFAULT 0");
+            await AddColumnAsync(db, "ALTER TABLE cafe_customers ADD COLUMN Version INTEGER NOT NULL DEFAULT 1");
+        });
+        await ApplyMigrationAsync(db, 2026092303, "separate-products-and-ingredients", async () =>
+        {
+            await AddColumnAsync(db, "ALTER TABLE ingredient_balances ADD COLUMN Sku TEXT NOT NULL DEFAULT ''");
+            await AddColumnAsync(db, "ALTER TABLE ingredient_balances ADD COLUMN Active INTEGER NOT NULL DEFAULT 1");
+            await AddColumnAsync(db, "ALTER TABLE ingredient_balances ADD COLUMN UpdatedAtUtc TEXT NOT NULL DEFAULT '0001-01-01T00:00:00+00:00'");
+            // Older builds stored raw materials in both tables. Preserve stock,
+            // recipes, movements, and history while retiring only the duplicate
+            // sellable-product projection.
+            await db.Database.ExecuteSqlRawAsync("UPDATE ingredient_balances SET Sku = COALESCE(NULLIF((SELECT p.Sku FROM products p WHERE p.Id = ingredient_balances.ItemId), ''), Sku), Name = COALESCE((SELECT p.Name FROM products p WHERE p.Id = ingredient_balances.ItemId), Name), Unit = COALESCE((SELECT p.Unit FROM products p WHERE p.Id = ingredient_balances.ItemId), Unit), QuantityScale = COALESCE((SELECT p.QuantityScale FROM products p WHERE p.Id = ingredient_balances.ItemId), QuantityScale), Active = COALESCE((SELECT p.Active FROM products p WHERE p.Id = ingredient_balances.ItemId), Active), Version = MAX(Version, COALESCE((SELECT p.Version FROM products p WHERE p.Id = ingredient_balances.ItemId), Version)), UpdatedAtUtc = COALESCE((SELECT p.UpdatedAtUtc FROM products p WHERE p.Id = ingredient_balances.ItemId), UpdatedAtUtc) WHERE EXISTS (SELECT 1 FROM products p WHERE p.Id = ingredient_balances.ItemId AND p.Kind = 'INGREDIENT'); UPDATE products SET Active = 0 WHERE Kind = 'INGREDIENT';");
+        });
+        await ApplyMigrationAsync(db, 2026092304, "device-stream-aware-outbox-sequences", async () =>
+        {
+            await db.Database.ExecuteSqlRawAsync("DROP INDEX IF EXISTS IX_outbox_Sequence; CREATE INDEX IX_outbox_Sequence ON outbox(Sequence);");
+        });
+        await ApplyMigrationAsync(db, 2026092401, "separate-ingredient-catalog-and-stock-versions", async () =>
+        {
+            await AddColumnAsync(db, "ALTER TABLE ingredient_balances ADD COLUMN StockVersion INTEGER NOT NULL DEFAULT 0");
+        });
+        await ApplyMigrationAsync(db, 2026092402, "saved-ingredient-purchase-unit-cost", async () =>
+        {
+            await AddColumnAsync(db, "ALTER TABLE ingredient_balances ADD COLUMN PurchaseUnitCostMicros INTEGER NOT NULL DEFAULT 0");
+            await db.Database.ExecuteSqlRawAsync("UPDATE ingredient_balances SET PurchaseUnitCostMicros = CASE WHEN QuantityScaled > 0 THEN ROUND(InventoryCostMinor * 10000.0 * QuantityScale / QuantityScaled) ELSE 0 END WHERE PurchaseUnitCostMicros = 0");
+        });
         var configuration = await db.Configuration.SingleOrDefaultAsync();
-        var highestSequence = await db.Outbox.Select(x => (int?)x.Sequence).MaxAsync() ?? 0;
+        var highestSequence = await db.Outbox.Where(x => !x.Acknowledged).Select(x => (int?)x.Sequence).MaxAsync() ?? 0;
         if (configuration is not null && configuration.NextDeviceSequence <= highestSequence)
         {
             configuration.NextDeviceSequence = highestSequence + 1;
             await db.SaveChangesAsync();
         }
+    }
+    private static async Task ApplyMigrationAsync(KitchenDbContext db, int version, string name, Func<Task> apply)
+    {
+        var alreadyApplied = await db.Database.SqlQueryRaw<int>(
+            "SELECT COUNT(*) AS Value FROM kitchen_schema_migrations WHERE Version = {0}", version).SingleAsync();
+        if (alreadyApplied != 0) return;
+        await using var transaction = await db.Database.BeginTransactionAsync();
+        await apply();
+        await db.Database.ExecuteSqlInterpolatedAsync($"INSERT INTO kitchen_schema_migrations (Version, Name, AppliedAtUtc) VALUES ({version}, {name}, {DateTimeOffset.UtcNow.ToString("O")})");
+        await transaction.CommitAsync();
     }
     private static async Task AddColumnAsync(KitchenDbContext db, string sql) { try { await db.Database.ExecuteSqlRawAsync(sql); } catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == 1 && ex.Message.Contains("duplicate column", StringComparison.OrdinalIgnoreCase)) { } }
 }

@@ -60,4 +60,40 @@ describe('ItemsService', () => {
     });
     /* eslint-enable @typescript-eslint/no-unsafe-assignment */
   });
+
+  it('publishes ingredients to Kitchen only and creates no branch retail prices', async () => {
+    const kitchenSiteId = '00000000-0000-0000-0000-000000000030';
+    const systemDeviceId = '00000000-0000-0000-0000-000000000031';
+    const createMany = jest.fn();
+    const syncEventCreate = jest.fn().mockResolvedValue({});
+    const siteFindMany = jest.fn().mockResolvedValue([{ id: kitchenSiteId, type: SiteType.KITCHEN }]);
+    const transaction = {
+      item: { create: jest.fn(({ data }) => Promise.resolve({ ...data, version: 1 })) },
+      retailPriceRevision: { create: jest.fn().mockResolvedValue({}) },
+      site: { findMany: siteFindMany },
+      siteRetailPrice: { createMany, findUnique: jest.fn() },
+      siteRetailPriceRevision: { createMany: jest.fn() },
+      device: { findFirst: jest.fn().mockResolvedValue({ id: systemDeviceId, profile: DeviceProfile.KITCHEN }) },
+      deviceSyncState: {
+        findUniqueOrThrow: jest.fn().mockResolvedValue({ deviceId: systemDeviceId, nextExpectedSequence: 1 }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      syncEvent: { create: syncEventCreate },
+      $queryRaw: jest.fn().mockResolvedValue([]),
+    };
+    const prisma = { $transaction: jest.fn((operation: (client: typeof transaction) => unknown) => operation(transaction)) };
+
+    await new ItemsService(prisma as never).create({
+      nameAr: 'دقيق', unit: 'g', quantityScale: 1, retailPriceMinor: 0, kind: ItemKind.INGREDIENT,
+    });
+
+    expect(createMany).not.toHaveBeenCalled();
+    expect(siteFindMany).toHaveBeenCalledTimes(1);
+    expect(siteFindMany).toHaveBeenCalledWith({
+      where: { active: true, type: 'KITCHEN' }, select: { id: true, type: true },
+    });
+    expect(syncEventCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({ siteId: kitchenSiteId, payload: expect.objectContaining({ kind: ItemKind.INGREDIENT }) }),
+    });
+  });
 });

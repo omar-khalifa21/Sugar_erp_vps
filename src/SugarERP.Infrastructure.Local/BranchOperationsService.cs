@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using System.Text.Json;
 using SugarERP.Application;
 using SugarERP.Domain;
 
@@ -269,10 +270,91 @@ public sealed class BranchOperationsService(LocalDatabase database) : IBranchOpe
         try
         {
             await using var db = database.CreateContext();
-            if (await db.DeviceConfigurations.AnyAsync(cancellationToken)) throw new BusinessRuleException("ALREADY_ENROLLED", "هذا الجهاز مسجل بالفعل.");
-            db.DeviceConfigurations.Add(new DeviceConfiguration { SiteId = result.SiteId, DeviceId = result.DeviceId, Profile = result.Profile, SiteName = "فرع نوع ١", ApiBaseUrl = command.ApiBaseUrl.ToString().TrimEnd('/'), DeviceCredential = DeviceCredentialProtector.Protect(result.Credential), StreamEpoch = result.StreamEpoch, TouchMode = command.TouchMode, EnrolledAtUtc = DateTimeOffset.UtcNow });
-            db.SequenceStates.Add(new SequenceState());
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+            var configuration = await db.DeviceConfigurations.SingleOrDefaultAsync(cancellationToken);
+            if (configuration is not null && (configuration.SiteId != result.SiteId || configuration.Profile != result.Profile))
+                throw new BusinessRuleException("WRONG_SITE", "رمز التسجيل لا يخص الموقع المسجل على هذا الجهاز.");
+
+            if (configuration is null)
+            {
+                configuration = new DeviceConfiguration { Id = 1 };
+                db.DeviceConfigurations.Add(configuration);
+            }
+            configuration.SiteId = result.SiteId;
+            configuration.DeviceId = result.DeviceId;
+            configuration.Profile = result.Profile;
+            configuration.SiteName = "فرع نوع ١";
+            configuration.ApiBaseUrl = command.ApiBaseUrl.ToString().TrimEnd('/');
+            configuration.DeviceCredential = DeviceCredentialProtector.Protect(result.Credential);
+            configuration.StreamEpoch = result.StreamEpoch;
+            configuration.TouchMode = command.TouchMode;
+            configuration.EnrolledAtUtc = DateTimeOffset.UtcNow;
+
+            // A newly enrolled server identity starts at sequence 1. Retain every
+            // unsent business event, remove only already-acknowledged transport
+            // envelopes, and rebuild sequence/hash metadata for the new stream.
+            var acknowledged = await db.OutboxMessages.Where(value => value.State == OutboxState.Acknowledged).ToListAsync(cancellationToken);
+            db.OutboxMessages.RemoveRange(acknowledged);
+            var outstanding = await db.OutboxMessages
+                .Where(value => value.State != OutboxState.Acknowledged)
+                .OrderBy(value => value.DeviceSequence)
+                .ToListAsync(cancellationToken);
+            foreach (var message in outstanding) message.DeviceSequence += 1_000_000;
             await db.SaveChangesAsync(cancellationToken);
+            var sequence = 1;
+            foreach (var message in outstanding)
+            {
+                message.DeviceSequence = sequence++;
+                message.ContentHash = ContractEventFactory.ComputeHash(
+                    message.EventId,
+                    message.DeviceSequence,
+                    message.EventType,
+                    message.SchemaVersion,
+                    message.OccurredAtUtc.ToUniversalTime().ToString("O"),
+                    JsonSerializer.Deserialize<JsonElement>(message.PayloadJson),
+                    JsonSerializer.Deserialize<Guid[]>(message.DependenciesJson) ?? []);
+                message.State = OutboxState.Pending;
+                message.Attempts = 0;
+                message.NextAttemptAtUtc = DateTimeOffset.UtcNow;
+                message.AcknowledgedAtUtc = null;
+                message.LastErrorCode = null;
+            }
+
+            var sequenceState = await db.SequenceStates.SingleOrDefaultAsync(cancellationToken);
+            if (sequenceState is null)
+            {
+                sequenceState = new SequenceState();
+                db.SequenceStates.Add(sequenceState);
+            }
+            sequenceState.NextDeviceSequence = sequence;
+            db.SyncCursors.RemoveRange(await db.SyncCursors.ToListAsync(cancellationToken));
+            await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+        }
+        finally
+        {
+            database.WriteLock.Release();
+        }
+    }
+
+    public async Task ClearEnrollmentAsync(CancellationToken cancellationToken = default)
+    {
+        await database.WriteLock.WaitAsync(cancellationToken);
+        try
+        {
+            await using var db = database.CreateContext();
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+            var configuration = await db.DeviceConfigurations.SingleOrDefaultAsync(cancellationToken);
+            if (configuration is null) return;
+
+            // Removing a connection is intentionally transport-only. Business rows,
+            // unsent outbox events, sequences, reports and audit history remain intact
+            // so a replacement enrollment can safely continue synchronization.
+            db.DeviceConfigurations.Remove(configuration);
+            db.SyncCursors.RemoveRange(db.SyncCursors);
+            db.InboxMessages.RemoveRange(db.InboxMessages);
+            await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
         }
         finally
         {

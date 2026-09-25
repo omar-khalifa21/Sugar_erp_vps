@@ -100,7 +100,7 @@ export class TransferProjectionService {
     const rows = lines(payload.lines);
     const itemIds = rows.map((row) => id(row.item_id));
     if (new Set(itemIds).size !== rows.length) error('INVALID_INVENTORY', 'Manual incoming repeats an item');
-    const catalog = await tx.item.findMany({ where: { id: { in: itemIds }, active: true }, select: { id: true } });
+    const catalog = await tx.item.findMany({ where: { id: { in: itemIds }, kind: ItemKind.PRODUCT, active: true }, select: { id: true } });
     if (catalog.length !== rows.length) error('DEPENDENCY_NOT_READY', 'Manual incoming contains an unknown product', 409);
     for (const row of rows) {
       const itemId = id(row.item_id), amount = quantity(row.quantity_scaled);
@@ -124,6 +124,8 @@ export class TransferProjectionService {
       error('INVALID_CATALOG_ITEM', 'Catalog item kind is invalid');
     const kind: ItemKind = payload.kind === ItemKind.INGREDIENT ? ItemKind.INGREDIENT :
       payload.kind === ItemKind.PRODUCT ? ItemKind.PRODUCT : existing?.kind ?? ItemKind.PRODUCT;
+    if (profile !== DeviceProfile.KITCHEN && kind !== ItemKind.PRODUCT)
+      error('WRONG_PROFILE', 'Branches can publish sellable products only', 403);
     const metadataUnchanged = !!existing && existing.sku === sku && existing.nameAr === nameAr && existing.unit === unit
       && existing.quantityScale === Number(scale) && existing.kind === kind && existing.active === payload.active;
     if (existing && version !== existing.version + 1 && !(profile !== DeviceProfile.KITCHEN && metadataUnchanged))
@@ -429,6 +431,8 @@ export class TransferProjectionService {
     const rows = lines(payload.lines);
     const itemIds = rows.map((line) => id(line.item_id));
     if (new Set(itemIds).size !== rows.length) error('INVALID_TRANSFER', 'A request cannot repeat an item');
+    const products = await tx.item.count({ where: { id: { in: itemIds }, kind: ItemKind.PRODUCT, active: true } });
+    if (products !== itemIds.length) error('INVALID_TRANSFER', 'A kitchen request can contain active products only', 409);
     await tx.kitchenRequest.create({ data: {
       id: requestId, requestingSiteId: siteId, kitchenSiteId: kitchen.id,
       version: Number(payload.version) || 1, businessDate: typeof payload.business_date === 'string' ? payload.business_date : null,
@@ -585,7 +589,7 @@ export class TransferProjectionService {
     if (rows.length > 500) error('INVALID_CAFE', 'Cafe price list is too large');
     const itemIds = rows.map((row) => id(row.item_id));
     if (new Set(itemIds).size !== itemIds.length) error('INVALID_CAFE', 'Cafe price list repeats an item');
-    const existingItems = await tx.item.findMany({ where: { id: { in: itemIds } }, select: { id: true } });
+    const existingItems = await tx.item.findMany({ where: { id: { in: itemIds }, kind: ItemKind.PRODUCT }, select: { id: true } });
     if (existingItems.length !== itemIds.length) error('DEPENDENCY_NOT_READY', 'Cafe price list contains an unknown item', 409);
     const code = `C-${customerId.replaceAll('-', '').slice(0, 12).toUpperCase()}`;
     await tx.cafeCustomer.create({ data: {
@@ -660,13 +664,16 @@ export class TransferProjectionService {
   }
 
   private async archiveCafeCustomer(tx: Client, event: SyncEventDto, siteId: string, profile: DeviceProfile) {
-    if (profile === DeviceProfile.KITCHEN) error('WRONG_PROFILE', 'A kitchen cannot archive branch cafe customers', 403);
     const payload = object(event.payload), customerId = id(payload.customer_id);
     if (id(payload.site_id) !== siteId) error('WRONG_SITE', 'Cafe customer origin does not match the authenticated site', 403);
     const customer = await tx.cafeCustomer.findUnique({ where: { id: customerId } });
     if (!customer) error('DEPENDENCY_NOT_READY', 'Cafe customer has not reached the server', 409);
-    if (customer.originSiteId !== siteId) error('WRONG_SITE', 'Only the owning site can archive this cafe customer', 403);
-    await tx.cafeCustomer.update({ where: { id: customerId }, data: { active: false } });
+    if (customer.originSiteId !== siteId && profile !== DeviceProfile.KITCHEN)
+      error('WRONG_SITE', 'Only the owning site or Kitchen can archive this cafe customer', 403);
+    const version = Number(payload.version);
+    if (!Number.isSafeInteger(version) || version !== customer.version + 1)
+      error('STALE_VERSION', 'Cafe changed on the server', 409);
+    await tx.cafeCustomer.update({ where: { id: customerId }, data: { active: false, version } });
   }
 
   private async cafePriceList(tx: Client, event: SyncEventDto, siteId: string, profile: DeviceProfile) {
@@ -682,6 +689,8 @@ export class TransferProjectionService {
     if (new Set(itemIds).size !== rows.length || rows.length !== customer.prices.length ||
       customer.prices.some((price) => !itemIds.includes(price.itemId)))
       error('INVALID_CAFE', 'A price update must contain each customer item exactly once');
+    const productCount = await tx.item.count({ where: { id: { in: itemIds }, kind: ItemKind.PRODUCT, active: true } });
+    if (productCount !== itemIds.length) error('INVALID_CAFE', 'Cafe prices can contain active products only');
     const currentVersion = Math.max(0, ...customer.prices.map((price) => price.version));
     if (version !== currentVersion + 1) error('STALE_VERSION', 'Cafe price list was updated by another client', 409);
     for (const row of rows) {

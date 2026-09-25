@@ -20,6 +20,7 @@ public sealed partial class BranchPosViewModel : ViewModelBase
     private readonly AsyncRelayCommand _completeSaleCommand;
     private readonly AsyncRelayCommand _syncCommand;
     private readonly AsyncRelayCommand _enrollCommand;
+    private readonly AsyncRelayCommand _clearEnrollmentCommand;
     private IReadOnlyList<CatalogItemSnapshot> _allItems = [];
     private Guid _pendingSaleCommandId = Guid.NewGuid();
     private Guid? _lastReceiptId;
@@ -42,6 +43,7 @@ public sealed partial class BranchPosViewModel : ViewModelBase
     private bool _isShiftOpen;
     private bool _hasReceipt;
     private bool _touchMode = true;
+    private bool _confirmClearEnrollment;
     private bool _isMorningShift = true;
     private bool _isCash = true;
     private bool _isTakeaway = true;
@@ -75,6 +77,7 @@ public sealed partial class BranchPosViewModel : ViewModelBase
         _completeSaleCommand = new AsyncRelayCommand(CompleteSaleAsync, CanCompleteSale);
         _syncCommand = new AsyncRelayCommand(SyncAsync, () => IsEnrolled && !IsBusy);
         _enrollCommand = new AsyncRelayCommand(EnrollAsync, () => NeedsEnrollment && !IsBusy);
+        _clearEnrollmentCommand = new AsyncRelayCommand(ClearEnrollmentAsync, () => IsEnrolled && !IsBusy);
         DismissReceiptCommand = new RelayCommand(DismissReceipt);
         ReturnToMainCommand = new RelayCommand(() => CurrentPage = BranchPage.Menu);
         ResumeShiftCommand = new RelayCommand(() => CurrentPage = BranchPage.Pos);
@@ -108,6 +111,11 @@ public sealed partial class BranchPosViewModel : ViewModelBase
     }
 
     public bool IsEnrolled => !NeedsEnrollment;
+    public bool ConfirmClearEnrollment
+    {
+        get => _confirmClearEnrollment;
+        set => SetProperty(ref _confirmClearEnrollment, value);
+    }
     public bool IsShiftOpen
     {
         get => _isShiftOpen;
@@ -344,6 +352,7 @@ public sealed partial class BranchPosViewModel : ViewModelBase
     public ICommand CompleteSaleCommand => _completeSaleCommand;
     public ICommand SyncCommand => _syncCommand;
     public ICommand EnrollCommand => _enrollCommand;
+    public ICommand ClearEnrollmentCommand => _clearEnrollmentCommand;
     public ICommand DismissReceiptCommand { get; }
     public ICommand ReturnToMainCommand { get; }
     public ICommand ResumeShiftCommand { get; }
@@ -526,6 +535,34 @@ public sealed partial class BranchPosViewModel : ViewModelBase
         }
     }
 
+    private async Task ClearEnrollmentAsync()
+    {
+        if (!ConfirmClearEnrollment)
+        {
+            ConfirmClearEnrollment = true;
+            StatusMessage = "اضغط حذف الاتصال مرة ثانية للتأكيد. عطّل الجهاز أولاً من لوحة الإدارة حتى يمكن استخدام رمز ربط جديد.";
+            return;
+        }
+
+        IsBusy = true;
+        try
+        {
+            await _operations.ClearEnrollmentAsync();
+            ConfirmClearEnrollment = false;
+            EnrollmentToken = string.Empty;
+            await RefreshSnapshotAsync();
+            StatusMessage = "حُذف الاتصال المحفوظ فقط. المبيعات والحركات المحلية محفوظة؛ أدخل رمز ربط جديد لإعادة الاتصال.";
+        }
+        catch (Exception)
+        {
+            StatusMessage = "تعذر حذف الاتصال المحفوظ. لم تُحذف أي بيانات تشغيلية.";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
     private async Task RefreshSnapshotAsync()
     {
         var snapshot = await _operations.GetSnapshotAsync();
@@ -627,6 +664,7 @@ public sealed partial class BranchPosViewModel : ViewModelBase
         _completeSaleCommand.NotifyCanExecuteChanged();
         _syncCommand.NotifyCanExecuteChanged();
         _enrollCommand.NotifyCanExecuteChanged();
+        _clearEnrollmentCommand.NotifyCanExecuteChanged();
         NotifyModuleCommandState();
     }
 

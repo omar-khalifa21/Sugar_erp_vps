@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { DeviceProfile, EnrollmentStatus, Item, Prisma } from '@prisma/client';
+import { DeviceProfile, EnrollmentStatus, Item, ItemKind, Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateItemDto } from './create-item.dto';
@@ -39,10 +39,12 @@ export class ItemsService {
       await transaction.retailPriceRevision.create({
         data: { itemId: item.id, priceMinor: item.retailPriceMinor, version: item.version },
       });
-      const branches = await transaction.site.findMany({
-        where: { active: true, type: { in: ['BRANCH_TYPE_1', 'BRANCH_TYPE_2'] } },
-        select: { id: true },
-      });
+      const branches = item.kind === ItemKind.PRODUCT
+        ? await transaction.site.findMany({
+            where: { active: true, type: { in: ['BRANCH_TYPE_1', 'BRANCH_TYPE_2'] } },
+            select: { id: true },
+          })
+        : [];
       if (branches.length) {
         await transaction.siteRetailPrice.createMany({
           data: branches.map((site) => ({ siteId: site.id, itemId: item.id, priceMinor: item.retailPriceMinor, version: 1 })),
@@ -98,7 +100,15 @@ export class ItemsService {
     item: Item,
     eventType: 'catalog.item_published' | 'catalog.item.updated',
   ): Promise<void> {
-    const sites = await transaction.site.findMany({ where: { active: true }, select: { id: true, type: true } });
+    const sites = await transaction.site.findMany({
+      where: {
+        active: true,
+        // Raw materials are kitchen-owned reference data and must never enter a
+        // branch sellable catalog or its durable sync feed.
+        ...(item.kind === ItemKind.INGREDIENT ? { type: 'KITCHEN' } : {}),
+      },
+      select: { id: true, type: true },
+    });
     for (const site of sites) {
       const sitePrice = site.type === 'KITCHEN'
         ? null

@@ -16,6 +16,71 @@ public sealed class BranchOperationsServiceTests
     private static readonly Guid ChocolateGateauxId = Guid.Parse("10000000-0000-4000-8000-000000000002");
 
     [Fact]
+    public async Task SaveEnrollmentAsync_ReusesStaleSequenceStateAndPreservesUnsentEvents()
+    {
+        await using var store = await TestStore.CreateAsync(seedFixtures: false);
+        var acknowledgedEvent = ContractEventFactory.Create(Guid.NewGuid(), 1, "catalog.item.updated", DateTimeOffset.UtcNow, new { item_id = Guid.NewGuid() });
+        var pendingEvent = ContractEventFactory.Create(Guid.NewGuid(), 5, "kitchen_request.submitted", DateTimeOffset.UtcNow, new { request_id = Guid.NewGuid() });
+        await using (var setup = store.Database.CreateContext())
+        {
+            setup.SequenceStates.Add(new SequenceState { NextDeviceSequence = 6 });
+            setup.OutboxMessages.AddRange(
+                new OutboxMessage { EventId = acknowledgedEvent.Id, AggregateId = Guid.NewGuid(), DeviceSequence = 1, EventType = acknowledgedEvent.EventType, OccurredAtUtc = acknowledgedEvent.OccurredAtUtc, PayloadJson = acknowledgedEvent.PayloadJson, DependenciesJson = acknowledgedEvent.DependenciesJson, ContentHash = acknowledgedEvent.ContentHash, State = OutboxState.Acknowledged, NextAttemptAtUtc = DateTimeOffset.UtcNow },
+                new OutboxMessage { EventId = pendingEvent.Id, AggregateId = Guid.NewGuid(), DeviceSequence = 5, EventType = pendingEvent.EventType, OccurredAtUtc = pendingEvent.OccurredAtUtc, PayloadJson = pendingEvent.PayloadJson, DependenciesJson = pendingEvent.DependenciesJson, ContentHash = pendingEvent.ContentHash, State = OutboxState.Failed, LastErrorCode = "UNAUTHENTICATED", Attempts = 3, NextAttemptAtUtc = DateTimeOffset.UtcNow });
+            await setup.SaveChangesAsync();
+        }
+
+        var siteId = Guid.NewGuid();
+        var deviceId = Guid.NewGuid();
+        await store.Operations.SaveEnrollmentAsync(
+            new EnrollmentCommand(new Uri("https://ascendyz.xyz/api/v1"), "one-time-token", "BRANCH-PC", "thumbprint", "1.2.6", true, DeviceProfile.BranchType1),
+            new EnrollmentResult(siteId, deviceId, DeviceProfile.BranchType1, "new-device-secret", 1));
+
+        await using var verify = store.Database.CreateContext();
+        var configuration = await verify.DeviceConfigurations.SingleAsync();
+        var outbox = await verify.OutboxMessages.SingleAsync();
+        Assert.Equal(deviceId, configuration.DeviceId);
+        Assert.Equal("https://ascendyz.xyz/api/v1", configuration.ApiBaseUrl);
+        Assert.Equal(1, outbox.DeviceSequence);
+        Assert.Equal(OutboxState.Pending, outbox.State);
+        Assert.Null(outbox.LastErrorCode);
+        Assert.Equal(2, (await verify.SequenceStates.SingleAsync()).NextDeviceSequence);
+        Assert.NotEqual(pendingEvent.ContentHash, outbox.ContentHash);
+    }
+
+    [Fact]
+    public async Task ClearEnrollmentAsync_RemovesOnlyTransportIdentityAndPreservesBusinessData()
+    {
+        await using var store = await TestStore.CreateAsync(seedFixtures: false);
+        var siteId = Guid.NewGuid();
+        await store.Operations.SaveEnrollmentAsync(
+            new EnrollmentCommand(new Uri("https://ascendyz.xyz/api/v1"), "token", "BRANCH-PC", "thumbprint", "1.2.7", true, DeviceProfile.BranchType1),
+            new EnrollmentResult(siteId, Guid.NewGuid(), DeviceProfile.BranchType1, "secret", 1));
+        var pending = ContractEventFactory.Create(Guid.NewGuid(), 1, "kitchen_request.submitted", DateTimeOffset.UtcNow, new { request_id = Guid.NewGuid() });
+        await using (var setup = store.Database.CreateContext())
+        {
+            setup.OutboxMessages.Add(new OutboxMessage
+            {
+                EventId = pending.Id, AggregateId = Guid.NewGuid(), DeviceSequence = 1, EventType = pending.EventType,
+                OccurredAtUtc = pending.OccurredAtUtc, PayloadJson = pending.PayloadJson, DependenciesJson = pending.DependenciesJson,
+                ContentHash = pending.ContentHash, State = OutboxState.Pending, NextAttemptAtUtc = DateTimeOffset.UtcNow
+            });
+            setup.SyncCursors.Add(new SyncCursor { FeedScope = "device", Cursor = "old", UpdatedAtUtc = DateTimeOffset.UtcNow });
+            setup.InboxMessages.Add(new InboxMessage { EventId = Guid.NewGuid(), ContentHash = new string('a', 64), AppliedAtUtc = DateTimeOffset.UtcNow });
+            await setup.SaveChangesAsync();
+        }
+
+        await store.Operations.ClearEnrollmentAsync();
+
+        await using var verify = store.Database.CreateContext();
+        Assert.Empty(await verify.DeviceConfigurations.ToListAsync());
+        Assert.Empty(await verify.SyncCursors.ToListAsync());
+        Assert.Empty(await verify.InboxMessages.ToListAsync());
+        Assert.Equal(pending.Id, (await verify.OutboxMessages.SingleAsync()).EventId);
+        Assert.Equal(1, (await verify.SequenceStates.SingleAsync()).NextDeviceSequence);
+    }
+
+    [Fact]
     public async Task InitializeAsync_AppliesInitialMigrationAndRequiredConnectionPragmas()
     {
         await using var store = await TestStore.CreateAsync(seedFixtures: false);

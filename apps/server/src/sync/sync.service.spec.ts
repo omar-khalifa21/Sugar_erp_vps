@@ -58,8 +58,16 @@ describe('SyncService routing', () => {
       expect.objectContaining({
         where: {
           OR: [
-            { siteId, deviceId: { not: deviceId } },
-            { eventType: { in: ['catalog.item_published', 'catalog.item.updated', 'catalog.item.deleted'] } },
+            {
+              siteId,
+              deviceId: { not: deviceId },
+              NOT: { eventType: { in: ['catalog.item_published', 'catalog.item.updated', 'catalog.item.deleted'] } },
+            },
+            {
+              eventType: { in: ['catalog.item_published', 'catalog.item.updated', 'catalog.item.deleted'] },
+              payload: { path: ['kind'], equals: 'PRODUCT' },
+            },
+            { eventType: { in: ['cafe_customer.created', 'cafe_customer.updated', 'cafe_customer.archived', 'cafe_customer.price_list_updated'] } },
             {
               eventType: 'shipment.dispatched',
               site: { type: SiteType.KITCHEN },
@@ -101,5 +109,24 @@ describe('SyncService routing', () => {
 
     expect(result.events).toHaveLength(1);
     expect(result.events[0].occurred_at).toBe(exactOccurredAt);
+  });
+
+  it('filters ingredients out of a branch bootstrap catalog', async () => {
+    const itemFindMany = jest.fn().mockResolvedValue([]);
+    const bootstrapService = new SyncService(
+      {
+        site: { findUniqueOrThrow: jest.fn().mockResolvedValue({ id: siteId, name: 'Branch', type: SiteType.BRANCH_TYPE_1, timezone: 'Africa/Cairo' }) },
+        item: { findMany: itemFindMany },
+        cafeCustomer: { findMany: jest.fn().mockResolvedValue([]) },
+        stockBalance: { findMany: jest.fn().mockResolvedValue([]) },
+      } as unknown as PrismaService,
+      { authenticate: jest.fn().mockResolvedValue({ id: deviceId, siteId, profile: DeviceProfile.BRANCH_TYPE_1 }) } as unknown as DeviceAuthService,
+      { getOrThrow: () => 'test-only-cursor-signing-key' } as unknown as ConfigService,
+      { apply: jest.fn() } as unknown as TransferProjectionService,
+    );
+
+    await bootstrapService.bootstrap(deviceId, 'test-secret');
+
+    expect(itemFindMany).toHaveBeenCalledWith(expect.objectContaining({ where: { active: true, kind: 'PRODUCT' } }));
   });
 });

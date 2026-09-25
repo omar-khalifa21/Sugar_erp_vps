@@ -1237,8 +1237,6 @@ public sealed class BranchModuleOperationsService(LocalDatabase database) : IBra
             }
             await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
             var configuration = await RequireBranchConfigurationAsync(db, cancellationToken);
-            if (configuration.Profile != DeviceProfile.BranchType2)
-                throw Rule("WRONG_PROFILE", "إدارة حسابات الكافيهات متاحة لفرع نوع ٢ فقط.");
             var customer = await db.CafeCustomers.SingleOrDefaultAsync(x => x.Id == cafeCustomerId, cancellationToken)
                 ?? throw Rule("CAFE_NOT_FOUND", "لم يتم العثور على الكافيه.");
             if (customer.Version != expectedVersion) throw Rule("STALE_VERSION", "تم تحديث الكافيه. أعد فتحه ثم حاول مرة أخرى.");

@@ -633,5 +633,6 @@ describe('Contract v1 sync (PostgreSQL integration)', () => {
       quantityScaled: '500', inventoryCostMinor: '25000',
     });
     expect(branchBody.catalog.some((row) => row.id === kitchenTestProductId)).toBe(true);
+    expect(branchBody.catalog.some((row) => row.id === kitchenTestIngredientId)).toBe(false);
   });
 });

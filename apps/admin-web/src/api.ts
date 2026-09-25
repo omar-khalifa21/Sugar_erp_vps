@@ -13,6 +13,7 @@ export interface Site {
 
 export interface Device {
   id: string;
+  name: string | null;
   siteId: string;
   profile: SiteType;
   enrollmentStatus: 'PENDING' | 'ENROLLED' | 'REVOKED';
@@ -330,6 +331,8 @@ export const api = {
     request<{ status: string; database: string; migrations: string }>('/ready'),
   sites: (token: string) => request<Site[]>('/sites', {}, token),
   devices: (token: string) => request<Device[]>('/devices', {}, token),
+  disableDevice: (token: string, id: string) =>
+    request<Device>(`/devices/${id}/revoke`, { method: 'POST' }, token),
   reports: (token: string) => request<ShiftReport[]>('/admin/reports', {}, token),
   downloadReport: (token: string, report: Pick<ShiftReport, 'id' | 'filename'>) =>
     downloadReport(`/admin/reports/${report.id}/download`, token, report.filename),

@@ -1,6 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import { HttpException, Injectable, UnauthorizedException } from '@nestjs/common';
-import { DeviceProfile, Prisma, SiteType } from '@prisma/client';
+import { DeviceProfile, ItemKind, Prisma, SiteType } from '@prisma/client';
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { DeviceAuthService } from './device-auth.service';
@@ -25,11 +25,18 @@ export class SyncService {
     const [site, catalog, customers, recipes, stock] = await Promise.all([
       this.prisma.site.findUniqueOrThrow({ where: { id: device.siteId }, select: { id: true, name: true, type: true, timezone: true } }),
       this.prisma.item.findMany({
-        where: { active: true },
+        where: {
+          active: true,
+          ...(device.profile === DeviceProfile.KITCHEN ? {} : { kind: ItemKind.PRODUCT }),
+        },
         include: { siteRetailPrices: { where: { siteId: device.siteId }, take: 1 } },
         orderBy: { nameAr: 'asc' },
       }),
-      this.prisma.cafeCustomer.findMany({ where: { active: true }, include: { prices: true }, orderBy: { name: 'asc' } }),
+      this.prisma.cafeCustomer.findMany({
+        where: { active: true },
+        include: { prices: { where: { item: { kind: ItemKind.PRODUCT, active: true } } } },
+        orderBy: { name: 'asc' },
+      }),
       device.profile === 'KITCHEN' ? this.prisma.recipe.findMany({ where: { active: true }, include: { components: true }, orderBy: { productItemId: 'asc' } }) : Promise.resolve([]),
       this.prisma.stockBalance.findMany({ where: { siteId: device.siteId }, select: { itemId: true, location: true, quantityScaled: true, inventoryCostMinor: true, version: true, asOfAt: true } }),
     ]);
@@ -169,13 +176,26 @@ export class SyncService {
     // A device already committed its own outbox locally before upload. Echoing those
     // events back can only duplicate work and can block older clients before they
     // reach changes published by another device or by the server.
-    const routes: Prisma.SyncEventWhereInput[] = [{ siteId: device.siteId, deviceId: { not: device.id } }];
+    const catalogEventTypes = ['catalog.item_published', 'catalog.item.updated', 'catalog.item.deleted'];
+    const routes: Prisma.SyncEventWhereInput[] = [{
+      siteId: device.siteId,
+      deviceId: { not: device.id },
+      // Branch databases are sellable-product catalogs. Do not let a same-site
+      // legacy/server event bypass the typed global catalog route below.
+      ...(device.profile === DeviceProfile.KITCHEN
+        ? {}
+        : { NOT: { eventType: { in: catalogEventTypes } } }),
+    }];
     // The catalog identity is global. Price remains site-scoped in the payload,
     // and desktop clients preserve their own price when the event belongs to a
     // different site.
-    routes.push({ eventType: { in: ['catalog.item_published', 'catalog.item.updated', 'catalog.item.deleted'] } });
-    if (device.profile !== DeviceProfile.BRANCH_TYPE_1)
-      routes.push({ eventType: { in: ['cafe_customer.created', 'cafe_customer.updated', 'cafe_customer.archived', 'cafe_customer.price_list_updated'] } });
+    routes.push({
+      eventType: { in: catalogEventTypes },
+      ...(device.profile === DeviceProfile.KITCHEN
+        ? {}
+        : { payload: { path: ['kind'], equals: ItemKind.PRODUCT } }),
+    });
+    routes.push({ eventType: { in: ['cafe_customer.created', 'cafe_customer.updated', 'cafe_customer.archived', 'cafe_customer.price_list_updated'] } });
     if (device.profile === DeviceProfile.KITCHEN) {
       // Requests are owned by branch writers, but must reach the kitchen feed.
       routes.push({
