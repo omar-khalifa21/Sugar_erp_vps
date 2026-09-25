@@ -610,11 +610,15 @@ function CatalogPage({ items, onCreate, onUpdate, onArchive }: {
   const [confirmArchiveId, setConfirmArchiveId] = useState<string | null>(null);
   const [form, setForm] = useState(blankForm);
   const [message, setMessage] = useState('');
+  const [catalogKind, setCatalogKind] = useState<Item['kind']>('PRODUCT');
+  const [search, setSearch] = useState('');
+  const visibleItems = items.filter((item) => item.kind === catalogKind
+    && item.nameAr.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()));
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setMessage('');
-    const retailPriceMinor = moneyInputToMinor(form.priceEgp);
+    const retailPriceMinor = form.kind === 'INGREDIENT' ? 0 : moneyInputToMinor(form.priceEgp);
     if (retailPriceMinor === null) {
       setMessage('أدخل سعراً صحيحاً بالجنيه، وبحد أقصى رقمين بعد العلامة.');
       return;
@@ -657,11 +661,18 @@ function CatalogPage({ items, onCreate, onUpdate, onArchive }: {
   };
 
   return <div className="page-stack">
-    <SectionToolbar count={`${items.length} أصناف`} action="إضافة صنف وسعره" onAction={() => { setEditingId(null); setForm(blankForm); setShowForm((value) => !value); }} />
+    <div className="catalog-toolbar">
+      <div className="catalog-kind-toggle" role="tablist" aria-label="نوع الأصناف">
+        <button type="button" role="tab" aria-selected={catalogKind === 'PRODUCT'} className={catalogKind === 'PRODUCT' ? 'active' : ''} onClick={() => { setCatalogKind('PRODUCT'); setSearch(''); }}>المنتجات</button>
+        <button type="button" role="tab" aria-selected={catalogKind === 'INGREDIENT'} className={catalogKind === 'INGREDIENT' ? 'active' : ''} onClick={() => { setCatalogKind('INGREDIENT'); setSearch(''); }}>الخامات</button>
+      </div>
+      <input className="catalog-search" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder={catalogKind === 'PRODUCT' ? 'بحث في المنتجات…' : 'بحث في الخامات…'} />
+      <SectionToolbar count={`${visibleItems.length} ${catalogKind === 'PRODUCT' ? 'منتجات' : 'خامات'}`} action={catalogKind === 'PRODUCT' ? 'إضافة منتج وسعره' : 'إضافة خامة'} onAction={() => { setEditingId(null); setForm({ ...blankForm, kind: catalogKind }); setShowForm((value) => !value); }} />
+    </div>
     {message && <div className="form-error" role="alert">{message}</div>}
     {showForm && <form className="panel inline-form catalog-form priced-form" onSubmit={submit}>
       <label>الاسم العربي<input value={form.nameAr} onChange={(event) => setForm({ ...form, nameAr: event.target.value })} required /></label>
-      <label>سعر البيع (جنيه)<input className="ltr" inputMode="decimal" value={form.priceEgp} onChange={(event) => setForm({ ...form, priceEgp: event.target.value })} placeholder="0.00" required /></label>
+      {form.kind === 'PRODUCT' && <label>سعر البيع (جنيه)<input className="ltr" inputMode="decimal" value={form.priceEgp} onChange={(event) => setForm({ ...form, priceEgp: event.target.value })} placeholder="0.00" required /></label>}
       <label>الوحدة<input value={form.unit} onChange={(event) => setForm({ ...form, unit: event.target.value })} required /></label>
       <label>دقة الكمية<input type="number" min="1" step="1" value={form.quantityScale} onChange={(event) => setForm({ ...form, quantityScale: Number(event.target.value) })} required /></label>
       <label>النوع<select value={form.kind} onChange={(event) => setForm({ ...form, kind: event.target.value as Item['kind'] })}><option value="PRODUCT">منتج</option><option value="INGREDIENT">خامة</option></select></label>
@@ -669,11 +680,11 @@ function CatalogPage({ items, onCreate, onUpdate, onArchive }: {
       <button type="button" className="secondary-button" onClick={() => { setShowForm(false); setEditingId(null); }}>إلغاء</button>
     </form>}
     <section className="panel table-panel">
-      <PanelHeading title="الأصناف والتسعيرات" subtitle="تعريف الصنف عام، وسعر البيع مستقل لكل فرع مع حفظ كل المراجعات" />
-      <div className="table-wrap"><table><thead><tr><th>الصنف</th><th>أسعار الفروع</th><th>النوع</th><th>الوحدة</th><th>الحالة</th><th>إجراءات</th></tr></thead><tbody>
-        {items.map((item) => <tr key={item.id}><td><strong>{item.nameAr}</strong></td><td>{item.siteRetailPrices?.length ? <div>{item.siteRetailPrices.map((price) => <div key={price.siteId}><small>{price.site.name}</small> <strong className={price.priceMinor === 0 ? 'price-missing' : 'price-value'}>{price.priceMinor === 0 ? 'غير مسعّر' : `${formatMoney(String(price.priceMinor))} EGP`}</strong></div>)}</div> : <strong className={item.retailPriceMinor === 0 ? 'price-missing' : 'price-value'}>{item.retailPriceMinor === 0 ? 'غير مسعّر' : `${formatMoney(String(item.retailPriceMinor))} EGP افتراضي`}</strong>}</td><td>{item.kind === 'PRODUCT' ? 'منتج' : 'خامة'}</td><td>{item.unit}</td><td><span className={`pill ${item.active ? 'success' : 'neutral'}`}>{item.active ? 'نشط' : 'مؤرشف'}</span></td><td><div className="row-actions"><button onClick={() => edit(item)}>تعديل التعريف الافتراضي</button><button className={confirmArchiveId === item.id ? 'confirm-delete' : ''} disabled={!item.active} onClick={() => void archive(item.id)}>{confirmArchiveId === item.id ? 'تأكيد' : 'أرشفة'}</button></div></td></tr>)}
+      <PanelHeading title={catalogKind === 'PRODUCT' ? 'المنتجات والتسعيرات' : 'الخامات'} subtitle={catalogKind === 'PRODUCT' ? 'أسعار بيع المنتجات مستقلة لكل فرع مع حفظ كل المراجعات' : 'تعريفات الخامات ووحداتها؛ تكلفة الوحدة يديرها المطبخ من سجل الشراء'} />
+      <div className="table-wrap"><table><thead><tr><th>{catalogKind === 'PRODUCT' ? 'المنتج' : 'الخامة'}</th><th>{catalogKind === 'PRODUCT' ? 'أسعار الفروع' : 'تكلفة الوحدة الحالية'}</th><th>الوحدة</th><th>الحالة</th><th>إجراءات</th></tr></thead><tbody>
+        {visibleItems.map((item) => <tr key={item.id}><td><strong>{item.nameAr}</strong></td><td>{catalogKind === 'PRODUCT' ? (item.siteRetailPrices?.length ? <div>{item.siteRetailPrices.map((price) => <div key={price.siteId}><small>{price.site.name}</small> <strong className={price.priceMinor === 0 ? 'price-missing' : 'price-value'}>{price.priceMinor === 0 ? 'غير مسعّر' : `${formatMoney(String(price.priceMinor))} EGP`}</strong></div>)}</div> : <strong className={item.retailPriceMinor === 0 ? 'price-missing' : 'price-value'}>{item.retailPriceMinor === 0 ? 'غير مسعّر' : `${formatMoney(String(item.retailPriceMinor))} EGP افتراضي`}</strong>) : <span className="muted-value">تُدار من المطبخ</span>}</td><td>{item.unit}</td><td><span className={`pill ${item.active ? 'success' : 'neutral'}`}>{item.active ? 'نشط' : 'مؤرشف'}</span></td><td><div className="row-actions"><button onClick={() => edit(item)}>تعديل التعريف</button><button className={confirmArchiveId === item.id ? 'confirm-delete' : ''} disabled={!item.active} onClick={() => void archive(item.id)}>{confirmArchiveId === item.id ? 'تأكيد' : 'أرشفة'}</button></div></td></tr>)}
       </tbody></table></div>
-      {!items.length && <EmptyState icon={PackageSearch} title="الكتالوج فارغ" text="أضف المنتجات والخامات وأسعارها المركزية." />}
+      {!visibleItems.length && <EmptyState icon={PackageSearch} title="لا توجد نتائج" text={catalogKind === 'PRODUCT' ? 'لا توجد منتجات تطابق البحث.' : 'لا توجد خامات تطابق البحث.'} />}
     </section>
   </div>;
 }
