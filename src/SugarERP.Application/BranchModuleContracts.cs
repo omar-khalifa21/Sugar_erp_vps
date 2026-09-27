@@ -97,7 +97,7 @@ public sealed record IncomingReceiptResult(
     bool WasAlreadyCommitted);
 public sealed record PostManualIncomingCommand(
     Guid CommandId,
-    string Reason,
+    string? Reason,
     IReadOnlyList<QuantityInput> Lines,
     Guid? UserId = null,
     string? Authorization = null,

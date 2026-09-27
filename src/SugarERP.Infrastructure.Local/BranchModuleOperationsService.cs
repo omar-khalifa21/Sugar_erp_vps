@@ -628,8 +628,8 @@ public sealed class BranchModuleOperationsService(LocalDatabase database) : IBra
     {
         ValidateCommandId(command.CommandId);
         ValidateQuantityInputs(command.Lines, "أدخل كمية وارد موجبة لصنف واحد على الأقل.");
-        var reason = command.Reason.Trim();
-        if (reason.Length < 3) throw Rule("REASON_REQUIRED", "اكتب مصدر أو سبب الوارد اليدوي.");
+        var reason = string.IsNullOrWhiteSpace(command.Reason) ? "إضافة وارد يدوي" : command.Reason.Trim();
+        if (reason.Length > 500) throw Rule("INVALID_REASON", "وصف الوارد اليدوي أطول من الحد المسموح.");
 
         await database.WriteLock.WaitAsync(cancellationToken);
         try

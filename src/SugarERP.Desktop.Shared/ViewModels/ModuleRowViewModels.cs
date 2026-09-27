@@ -1,5 +1,8 @@
 using SugarERP.Application;
 using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using System.Globalization;
+using System.Windows.Input;
 
 namespace SugarERP.Desktop.Shared.ViewModels;
 
@@ -38,6 +41,8 @@ public sealed class QuantityEntryRowViewModel : ViewModelBase
         QuantityScale = quantityScale;
         AvailableText = availableText;
         ExpectedText = expectedText;
+        IncreaseCommand = new RelayCommand(Increase);
+        DecreaseCommand = new RelayCommand(Decrease);
     }
 
     public Guid ItemId { get; }
@@ -48,11 +53,27 @@ public sealed class QuantityEntryRowViewModel : ViewModelBase
     public string ExpectedText { get; }
     public string OpeningText { get; init; } = string.Empty;
     public string IncomingText { get; init; } = string.Empty;
+    public ICommand IncreaseCommand { get; }
+    public ICommand DecreaseCommand { get; }
 
     public string QuantityText
     {
         get => _quantityText;
         set => SetProperty(ref _quantityText, value);
+    }
+
+    private void Increase()
+    {
+        _ = ArabicDisplay.TryParseQuantity(QuantityText, QuantityScale, true, out var current);
+        QuantityText = ((decimal)checked(current + QuantityScale) / QuantityScale)
+            .ToString("0.###", CultureInfo.InvariantCulture);
+    }
+
+    private void Decrease()
+    {
+        _ = ArabicDisplay.TryParseQuantity(QuantityText, QuantityScale, true, out var current);
+        var next = Math.Max(0, current - QuantityScale);
+        QuantityText = ((decimal)next / QuantityScale).ToString("0.###", CultureInfo.InvariantCulture);
     }
 }
 

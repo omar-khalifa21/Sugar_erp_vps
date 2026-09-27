@@ -45,7 +45,6 @@ public sealed partial class BranchPosViewModel
     private CatalogRowViewModel? _selectedCatalogItem;
     private string _requestStatusText = "اختر الكميات واضغط حفظ الطلب وإرساله. يعمل حتى بدون إنترنت.";
     private string _incomingStatusText = "تظهر هنا الشحنات التي أرسلها المطبخ.";
-    private string _manualIncomingReason = string.Empty;
     private string _manualIncomingStatusText = "اختر الأصناف والكميات، ثم راجع الوارد قبل التأكيد.";
     private string _shiftHistorySummaryText = string.Empty;
     private string _returnStatusText = "مرتجع المطبخ مستند مستقل ويخصم الرصيد مرة واحدة عند الإرسال.";
@@ -92,7 +91,6 @@ public sealed partial class BranchPosViewModel
     public string CatalogSummaryText { get => _catalogSummaryText; private set => SetProperty(ref _catalogSummaryText, value); }
     public string RequestStatusText { get => _requestStatusText; private set => SetProperty(ref _requestStatusText, value); }
     public string IncomingStatusText { get => _incomingStatusText; private set => SetProperty(ref _incomingStatusText, value); }
-    public string ManualIncomingReason { get => _manualIncomingReason; set => SetProperty(ref _manualIncomingReason, value); }
     public string ManualIncomingStatusText { get => _manualIncomingStatusText; private set => SetProperty(ref _manualIncomingStatusText, value); }
     public bool DeductKitchenIngredients
     {
@@ -743,10 +741,9 @@ public sealed partial class BranchPosViewModel
         try
         {
             await _moduleOperations.PostManualIncomingAsync(new PostManualIncomingCommand(
-                Guid.NewGuid(), ManualIncomingReason, _pendingManualIncomingLines,
+                Guid.NewGuid(), null, _pendingManualIncomingLines,
                 DeductKitchenIngredients: DeductKitchenIngredients));
             ClearQuantities(ManualIncomingRows);
-            ManualIncomingReason = string.Empty;
             DeductKitchenIngredients = false;
             ManualIncomingReviewRows.Clear();
             _pendingManualIncomingLines = [];
@@ -766,11 +763,6 @@ public sealed partial class BranchPosViewModel
         if (!TryReadPositiveRows(ManualIncomingRows, out var lines, out var message))
         {
             ManualIncomingStatusText = message;
-            return;
-        }
-        if (string.IsNullOrWhiteSpace(ManualIncomingReason) || ManualIncomingReason.Trim().Length < 3)
-        {
-            ManualIncomingStatusText = "اكتب مصدر أو سبب الوارد اليدوي.";
             return;
         }
         _pendingManualIncomingLines = lines;

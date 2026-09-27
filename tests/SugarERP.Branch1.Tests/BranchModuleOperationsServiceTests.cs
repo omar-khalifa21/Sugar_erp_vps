@@ -2,11 +2,13 @@ using System.Globalization;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Spreadsheet;
 using DocumentFormat.OpenXml.Validation;
+using CommunityToolkit.Mvvm.Input;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using SugarERP.Application;
 using SugarERP.Domain;
 using SugarERP.Infrastructure.Local;
+using SugarERP.Desktop.Shared.ViewModels;
 using Xunit;
 
 namespace SugarERP.Branch1.Tests;
@@ -203,6 +205,77 @@ public sealed class BranchModuleOperationsServiceTests
         var message = await db.OutboxMessages.SingleAsync(x => x.EventId == command.CommandId);
         Assert.Equal(OutboxState.Pending, message.State);
         Assert.Contains("\"deduct_kitchen_ingredients\":false", message.PayloadJson);
+    }
+
+    [Fact]
+    public async Task PostManualIncomingAsync_WithoutReason_PostsTwoItemsAndQueuesSystemDescription()
+    {
+        await using var store = await ModuleTestStore.CreateAsync();
+        await store.Operations.OpenShiftAsync(ShiftKind.Morning, 0);
+        var before = await ReadBalancesAsync(store.Database, [ChocolateCakeId, ChocolateGateauxId]);
+        var command = new PostManualIncomingCommand(Guid.NewGuid(), null,
+            [new QuantityInput(ChocolateCakeId, 2), new QuantityInput(ChocolateGateauxId, 3)]);
+
+        await store.Modules.PostManualIncomingAsync(command);
+
+        await using var db = store.Database.CreateContext();
+        Assert.Equal(before[ChocolateCakeId] + 2,
+            (await db.StockBalances.SingleAsync(x => x.ItemId == ChocolateCakeId)).QuantityScaled);
+        Assert.Equal(before[ChocolateGateauxId] + 3,
+            (await db.StockBalances.SingleAsync(x => x.ItemId == ChocolateGateauxId)).QuantityScaled);
+        var message = await db.OutboxMessages.SingleAsync(x => x.EventId == command.CommandId);
+        Assert.Contains("إضافة وارد يدوي", message.PayloadJson);
+    }
+
+    [Fact]
+    public void ManualIncomingQuantityControls_ChangeByOneAndNeverGoBelowZero()
+    {
+        var row = new QuantityEntryRowViewModel(Guid.NewGuid(), "صنف", "قطعة", 1, "0 قطعة");
+
+        row.IncreaseCommand.Execute(null);
+        row.IncreaseCommand.Execute(null);
+        row.DecreaseCommand.Execute(null);
+        Assert.Equal("1", row.QuantityText);
+
+        row.DecreaseCommand.Execute(null);
+        row.DecreaseCommand.Execute(null);
+        Assert.Equal("0", row.QuantityText);
+
+        row.QuantityText = "4";
+        row.IncreaseCommand.Execute(null);
+        Assert.Equal("5", row.QuantityText);
+    }
+
+    [Fact]
+    public async Task ManualIncomingViewModel_ReviewsAndConfirmsTwoItemsWithoutEmployeeReason()
+    {
+        await using var store = await ModuleTestStore.CreateAsync();
+        await store.Operations.OpenShiftAsync(ShiftKind.Morning, 0);
+        var before = await ReadBalancesAsync(store.Database, [ChocolateCakeId, ChocolateGateauxId]);
+        var viewModel = new BranchPosViewModel(store.Operations, store.Modules, new TestReportWriter(),
+            new TestPrinter(), new TestEnrollmentClient(), new SuccessfulSyncService());
+        await viewModel.InitializeAsync();
+        viewModel.ManualIncomingRows.Add(new QuantityEntryRowViewModel(ChocolateCakeId, "كيك شوكولاتة", "قطعة", 1, "18 قطعة"));
+        viewModel.ManualIncomingRows.Add(new QuantityEntryRowViewModel(ChocolateGateauxId, "جاتوه شوكولاتة", "قطعة", 1, "20 قطعة"));
+
+        viewModel.ManualIncomingRows[0].IncreaseCommand.Execute(null);
+        viewModel.ManualIncomingRows[0].IncreaseCommand.Execute(null);
+        viewModel.ManualIncomingRows[1].IncreaseCommand.Execute(null);
+        viewModel.ManualIncomingRows[1].IncreaseCommand.Execute(null);
+        viewModel.ManualIncomingRows[1].IncreaseCommand.Execute(null);
+        viewModel.ManualIncomingRows[1].DecreaseCommand.Execute(null);
+        viewModel.ReviewManualIncomingCommand.Execute(null);
+
+        Assert.True(viewModel.IsManualIncomingReview);
+        Assert.Equal(2, viewModel.ManualIncomingReviewRows.Count);
+        await Assert.IsAssignableFrom<IAsyncRelayCommand>(viewModel.PostManualIncomingCommand).ExecuteAsync(null);
+
+        await using var db = store.Database.CreateContext();
+        Assert.Equal(before[ChocolateCakeId] + 2,
+            (await db.StockBalances.SingleAsync(x => x.ItemId == ChocolateCakeId)).QuantityScaled);
+        Assert.Equal(before[ChocolateGateauxId] + 2,
+            (await db.StockBalances.SingleAsync(x => x.ItemId == ChocolateGateauxId)).QuantityScaled);
+        Assert.Single(await db.OutboxMessages.Where(x => x.EventType == "manual_incoming.posted").ToListAsync());
     }
 
     [Fact]
@@ -668,5 +741,35 @@ public sealed class BranchModuleOperationsServiceTests
             if (Directory.Exists(_directory)) Directory.Delete(_directory, recursive: true);
             return ValueTask.CompletedTask;
         }
+    }
+
+    private sealed class TestReportWriter : IShiftReportWriter
+    {
+        public Task<ShiftReportWriteResult> WriteAsync(ShiftReportData report, string exportDirectory, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+    }
+
+    private sealed class TestPrinter : IBranchPrinter
+    {
+        public IReadOnlyList<string> GetInstalledPrinterNames() => [];
+        public Task PrintTestAsync(string printerName, string siteName, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task PrintSaleAsync(string printerName, string siteName, SaleDetailsSnapshot sale, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task PrintCustomOrderAsync(string printerName, string siteName, CustomOrderSnapshot order, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task PrintShiftReportAsync(string printerName, ShiftReportData report, CancellationToken cancellationToken = default) => Task.CompletedTask;
+    }
+
+    private sealed class TestEnrollmentClient : IEnrollmentClient
+    {
+        public Task<EnrollmentResult> EnrollAsync(EnrollmentCommand command, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+    }
+
+    private sealed class SuccessfulSyncService : IBranchSyncService
+    {
+        public Task<SyncRunResult> PushPendingAsync(CancellationToken cancellationToken = default) => SynchronizeAsync(cancellationToken);
+        public Task<SyncRunResult> SynchronizeAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult(new SyncRunResult(1, 1, 0, "تمت المزامنة", true));
+        public Task<ConnectivityResult> TestConnectionAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult(new ConnectivityResult(true, true, "متصل"));
     }
 }
