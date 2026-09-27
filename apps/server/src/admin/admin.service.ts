@@ -38,7 +38,7 @@ export class AdminService {
     const site = await this.prisma.site.findUnique({ where: { id: siteId } });
     if (!site) throw new NotFoundException('Site not found');
     const { dayStart, nextDay, monthStart, nextMonth } = cairoBoundaries();
-    const [stock, today, month, todayCorrections, monthCorrections, recentSales, pendingAdjustments, inventoryHistory] = await Promise.all([
+    const [stock, today, month, todayCorrections, monthCorrections, recentSales, pendingAdjustments, inventoryHistory, manualIncoming] = await Promise.all([
       this.prisma.stockBalance.findMany({
         where: { siteId },
         include: { item: true },
@@ -69,7 +69,14 @@ export class AdminService {
       this.prisma.stockAdjustment.count({ where: { siteId, status: 'PENDING_SITE_APPLY' } }),
       this.prisma.inventoryTransaction.findMany({ where: { siteId }, include: { lines: { include: { item: true } }, user: { select: { displayName: true } } },
         orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }], take: 100 }),
+      this.prisma.syncEvent.findMany({ where: { siteId, eventType: 'manual_incoming.posted' }, orderBy: { occurredAt: 'desc' }, take: 100,
+        select: { id: true, occurredAt: true, payload: true } }),
     ]);
+    const manualIds = manualIncoming.map((entry) => entry.id);
+    const ingredientDeductions = manualIds.length ? await this.prisma.ingredientStockTransaction.groupBy({
+      by: ['sourceEventId'], where: { sourceEventId: { in: manualIds }, kind: 'MANUAL_INCOMING_CONSUMPTION' }, _count: { _all: true },
+    }) : [];
+    const deductedIds = new Set(ingredientDeductions.map((entry) => entry.sourceEventId));
 
     const newest = stock.reduce<Date | null>(
       (latest, row) => (!latest || row.asOfAt > latest ? row.asOfAt : latest),
@@ -77,6 +84,15 @@ export class AdminService {
     );
     return {
       site,
+      manual_incoming: manualIncoming.map((entry) => {
+        const payload = entry.payload && typeof entry.payload === 'object' && !Array.isArray(entry.payload)
+          ? entry.payload as Record<string, unknown> : {};
+        const requested = payload.deduct_kitchen_ingredients === true;
+        return { id: entry.id, occurred_at: entry.occurredAt.toISOString(), source: 'MANUAL_BRANCH_ENTRY',
+          reason: typeof payload.reason === 'string' ? payload.reason : '',
+          kitchen_ingredients: requested ? (deductedIds.has(entry.id) ? 'DEDUCTED' : 'PENDING') : 'NOT_REQUESTED',
+          lines: Array.isArray(payload.lines) ? payload.lines : [] };
+      }),
       inventory_history: inventoryHistory.map((movement) => ({
         id: movement.id, reference_id: movement.referenceId, kind: movement.kind, reason: movement.reason,
         user_name: movement.user.displayName, occurred_at: movement.occurredAt.toISOString(),

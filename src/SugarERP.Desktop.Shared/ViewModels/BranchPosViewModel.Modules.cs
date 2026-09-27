@@ -16,6 +16,8 @@ public sealed partial class BranchPosViewModel
     private AsyncRelayCommand _submitRequestCommand = null!;
     private AsyncRelayCommand _receiveShipmentCommand = null!;
     private AsyncRelayCommand _postManualIncomingCommand = null!;
+    private RelayCommand _reviewManualIncomingCommand = null!;
+    private RelayCommand _editManualIncomingCommand = null!;
     private AsyncRelayCommand _refundSaleCommand = null!;
     private AsyncRelayCommand _submitReturnCommand = null!;
     private RelayCommand _advanceCloseStepCommand = null!;
@@ -44,6 +46,7 @@ public sealed partial class BranchPosViewModel
     private string _requestStatusText = "اختر الكميات واضغط حفظ الطلب وإرساله. يعمل حتى بدون إنترنت.";
     private string _incomingStatusText = "تظهر هنا الشحنات التي أرسلها المطبخ.";
     private string _manualIncomingReason = string.Empty;
+    private string _manualIncomingStatusText = "اختر الأصناف والكميات، ثم راجع الوارد قبل التأكيد.";
     private string _shiftHistorySummaryText = string.Empty;
     private string _returnStatusText = "مرتجع المطبخ مستند مستقل ويخصم الرصيد مرة واحدة عند الإرسال.";
     private string _closingSummaryText = string.Empty;
@@ -62,6 +65,9 @@ public sealed partial class BranchPosViewModel
     private bool _isRefundCash = true;
     private bool _hasIncomingShipments;
     private bool _isCatalogEditorOpen;
+    private bool _deductKitchenIngredients;
+    private bool _isManualIncomingReview;
+    private IReadOnlyList<QuantityInput> _pendingManualIncomingLines = [];
     private int _closeStep = 1;
     private string _catalogSku = string.Empty;
     private string _catalogName = string.Empty;
@@ -75,6 +81,7 @@ public sealed partial class BranchPosViewModel
     public ObservableCollection<IncomingRowViewModel> IncomingRows { get; } = [];
     public ObservableCollection<IncomingCountRowViewModel> IncomingCountRows { get; } = [];
     public ObservableCollection<QuantityEntryRowViewModel> ManualIncomingRows { get; } = [];
+    public ObservableCollection<ManualIncomingReviewRowViewModel> ManualIncomingReviewRows { get; } = [];
     public ObservableCollection<SaleHistoryRowViewModel> SaleRows { get; } = [];
     public ObservableCollection<SaleLineCorrectionRowViewModel> SaleDetailLines { get; } = [];
     public ObservableCollection<QuantityEntryRowViewModel> ReturnRows { get; } = [];
@@ -86,6 +93,28 @@ public sealed partial class BranchPosViewModel
     public string RequestStatusText { get => _requestStatusText; private set => SetProperty(ref _requestStatusText, value); }
     public string IncomingStatusText { get => _incomingStatusText; private set => SetProperty(ref _incomingStatusText, value); }
     public string ManualIncomingReason { get => _manualIncomingReason; set => SetProperty(ref _manualIncomingReason, value); }
+    public string ManualIncomingStatusText { get => _manualIncomingStatusText; private set => SetProperty(ref _manualIncomingStatusText, value); }
+    public bool DeductKitchenIngredients
+    {
+        get => _deductKitchenIngredients;
+        set
+        {
+            if (!SetProperty(ref _deductKitchenIngredients, value)) return;
+            OnPropertyChanged(nameof(KitchenDeductionReviewText));
+        }
+    }
+    public string KitchenDeductionReviewText => DeductKitchenIngredients ? "سيتم الخصم" : "لن يتم الخصم";
+    public bool IsManualIncomingReview
+    {
+        get => _isManualIncomingReview;
+        private set
+        {
+            if (!SetProperty(ref _isManualIncomingReview, value)) return;
+            OnPropertyChanged(nameof(IsManualIncomingEntry));
+            _postManualIncomingCommand?.NotifyCanExecuteChanged();
+        }
+    }
+    public bool IsManualIncomingEntry => !IsManualIncomingReview;
     public string ShiftHistorySummaryText { get => _shiftHistorySummaryText; private set => SetProperty(ref _shiftHistorySummaryText, value); }
     public string ReturnStatusText { get => _returnStatusText; private set => SetProperty(ref _returnStatusText, value); }
     public string ClosingSummaryText { get => _closingSummaryText; private set => SetProperty(ref _closingSummaryText, value); }
@@ -272,6 +301,8 @@ public sealed partial class BranchPosViewModel
     public ICommand AddRequestLineCommand => _addRequestLineCommand;
     public ICommand ReceiveShipmentCommand => _receiveShipmentCommand;
     public ICommand PostManualIncomingCommand => _postManualIncomingCommand;
+    public ICommand ReviewManualIncomingCommand => _reviewManualIncomingCommand;
+    public ICommand EditManualIncomingCommand => _editManualIncomingCommand;
     public ICommand RefundSaleCommand => _refundSaleCommand;
     public ICommand AddReturnLineCommand => _addReturnLineCommand;
     public ICommand SubmitReturnCommand => _submitReturnCommand;
@@ -298,7 +329,9 @@ public sealed partial class BranchPosViewModel
         _saveRequestDraftCommand = new AsyncRelayCommand(() => SaveRequestAsync(false), () => !IsBusy);
         _submitRequestCommand = new AsyncRelayCommand(SubmitRequestAsync, () => !IsBusy);
         _receiveShipmentCommand = new AsyncRelayCommand(ReceiveShipmentAsync, () => SelectedIncoming?.Snapshot.IsReceivable == true && !IsBusy);
-        _postManualIncomingCommand = new AsyncRelayCommand(PostManualIncomingAsync, () => IsShiftOpen && !IsBusy);
+        _reviewManualIncomingCommand = new RelayCommand(ReviewManualIncoming);
+        _editManualIncomingCommand = new RelayCommand(() => IsManualIncomingReview = false);
+        _postManualIncomingCommand = new AsyncRelayCommand(PostManualIncomingAsync, () => IsShiftOpen && IsManualIncomingReview && !IsBusy);
         _refundSaleCommand = new AsyncRelayCommand(RefundSaleAsync, () => !IsBusy);
         _submitReturnCommand = new AsyncRelayCommand(SubmitReturnAsync, () => IsShiftOpen && !IsBusy);
         _advanceCloseStepCommand = new RelayCommand(AdvanceCloseStep, () => CloseStep < 4);
@@ -389,6 +422,9 @@ public sealed partial class BranchPosViewModel
                     break;
                 case BranchPage.Incoming:
                     await LoadIncomingAsync();
+                    break;
+                case BranchPage.ManualIncoming:
+                    await LoadManualIncomingAsync();
                     break;
                 case BranchPage.ShiftHistory:
                     await LoadShiftHistoryAsync();
@@ -662,12 +698,19 @@ public sealed partial class BranchPosViewModel
 
     private async Task LoadIncomingAsync()
     {
+        await ReloadIncomingShipmentsAsync();
+    }
+
+    private async Task LoadManualIncomingAsync()
+    {
         var catalog = await _moduleOperations.GetCatalogAsync();
         ManualIncomingRows.Clear();
         foreach (var item in catalog.Items.Where(value => value.Active).OrderBy(value => value.NameAr))
             ManualIncomingRows.Add(new QuantityEntryRowViewModel(item.Id, item.NameAr, item.Unit, item.QuantityScale,
                 ArabicDisplay.Quantity(item.QuantityScaled, item.QuantityScale, item.Unit)));
-        await ReloadIncomingShipmentsAsync();
+        ManualIncomingReviewRows.Clear();
+        _pendingManualIncomingLines = [];
+        IsManualIncomingReview = false;
     }
 
     private async Task ReloadIncomingShipmentsAsync()
@@ -695,21 +738,53 @@ public sealed partial class BranchPosViewModel
 
     private async Task PostManualIncomingAsync()
     {
-        if (!TryReadPositiveRows(ManualIncomingRows, out var lines, out var message)) { IncomingStatusText = message; return; }
+        if (_pendingManualIncomingLines.Count == 0) { ManualIncomingStatusText = "راجع الوارد مرة أخرى قبل التأكيد."; return; }
         IsBusy = true;
         try
         {
-            await _moduleOperations.PostManualIncomingAsync(new PostManualIncomingCommand(Guid.NewGuid(), ManualIncomingReason, lines));
+            await _moduleOperations.PostManualIncomingAsync(new PostManualIncomingCommand(
+                Guid.NewGuid(), ManualIncomingReason, _pendingManualIncomingLines,
+                DeductKitchenIngredients: DeductKitchenIngredients));
             ClearQuantities(ManualIncomingRows);
             ManualIncomingReason = string.Empty;
+            DeductKitchenIngredients = false;
+            ManualIncomingReviewRows.Clear();
+            _pendingManualIncomingLines = [];
+            IsManualIncomingReview = false;
             var sync = await _syncService.SynchronizeAsync();
             await RefreshSnapshotAsync();
-            await LoadIncomingAsync();
-            IncomingStatusText = sync.Succeeded ? "تمت إضافة الوارد اليدوي ومزامنته مع الخادم." : $"تم حفظ الوارد محلياً. {sync.UserMessage}";
+            await LoadManualIncomingAsync();
+            ManualIncomingStatusText = sync.Succeeded ? "تمت إضافة الوارد اليدوي ومزامنته مع الخادم." : $"تم حفظ الوارد محلياً. {sync.UserMessage}";
         }
-        catch (BusinessRuleException exception) { IncomingStatusText = exception.UserMessage; }
-        catch { IncomingStatusText = "تعذر حفظ الوارد اليدوي. لم تتغير الكميات."; }
+        catch (BusinessRuleException exception) { ManualIncomingStatusText = exception.UserMessage; }
+        catch { ManualIncomingStatusText = "تعذر حفظ الوارد اليدوي. لم تتغير الكميات."; }
         finally { IsBusy = false; }
+    }
+
+    private void ReviewManualIncoming()
+    {
+        if (!TryReadPositiveRows(ManualIncomingRows, out var lines, out var message))
+        {
+            ManualIncomingStatusText = message;
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(ManualIncomingReason) || ManualIncomingReason.Trim().Length < 3)
+        {
+            ManualIncomingStatusText = "اكتب مصدر أو سبب الوارد اليدوي.";
+            return;
+        }
+        _pendingManualIncomingLines = lines;
+        ManualIncomingReviewRows.Clear();
+        foreach (var line in lines)
+        {
+            var row = ManualIncomingRows.Single(value => value.ItemId == line.ItemId);
+            ManualIncomingReviewRows.Add(new ManualIncomingReviewRowViewModel(
+                line.ItemId, row.Name, ArabicDisplay.Quantity(line.QuantityScaled, row.QuantityScale, row.Unit)));
+        }
+        ManualIncomingStatusText = DeductKitchenIngredients
+            ? "راجع الأصناف: بعد المزامنة سيخصم الخادم خامات الوصفات من المطبخ مرة واحدة."
+            : "راجع الأصناف: ستتزامن الحركة كالمعتاد من دون خصم أي خامات من المطبخ.";
+        IsManualIncomingReview = true;
     }
 
     private void PopulateIncomingCounts(IncomingShipmentSnapshot? shipment)

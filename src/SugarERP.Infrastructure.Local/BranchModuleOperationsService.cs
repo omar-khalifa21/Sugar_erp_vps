@@ -693,6 +693,8 @@ public sealed class BranchModuleOperationsService(LocalDatabase database) : IBra
             var sequence = await GetSequenceAsync(db, cancellationToken);
             QueueEvent(db, sequence, command.CommandId, "manual_incoming.posted", now, new {
                 document_id = command.CommandId, site_id = configuration.SiteId, shift_id = shift.Id, reason,
+                source = "MANUAL_BRANCH_ENTRY",
+                deduct_kitchen_ingredients = command.DeductKitchenIngredients,
                 location = configuration.Profile == DeviceProfile.BranchType2 ? "FREEZER" : "SALEABLE", lines = eventLines
             }, command.CommandId);
             await db.SaveChangesAsync(cancellationToken);

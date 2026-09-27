@@ -171,7 +171,8 @@ public sealed class BranchModuleOperationsServiceTests
         await using var store = await ModuleTestStore.CreateAsync();
         var shift = await store.Operations.OpenShiftAsync(ShiftKind.Morning, 0);
         var before = await ReadBalancesAsync(store.Database, [ChocolateCakeId]);
-        var command = new PostManualIncomingCommand(Guid.NewGuid(), "توريد مباشر من المخزن", [new QuantityInput(ChocolateCakeId, 7)]);
+        var command = new PostManualIncomingCommand(Guid.NewGuid(), "توريد مباشر من المخزن", [new QuantityInput(ChocolateCakeId, 7)],
+            DeductKitchenIngredients: true);
 
         var first = await store.Modules.PostManualIncomingAsync(command);
         var replay = await store.Modules.PostManualIncomingAsync(command);
@@ -184,6 +185,24 @@ public sealed class BranchModuleOperationsServiceTests
         Assert.Single(await db.StockMovements.Where(x => x.DocumentId == command.CommandId && x.Kind == StockMovementKind.IncomingReceipt).ToListAsync());
         var message = Assert.Single(await db.OutboxMessages.Where(x => x.EventId == command.CommandId && x.EventType == "manual_incoming.posted").ToListAsync());
         Assert.Contains("توريد مباشر", message.PayloadJson);
+        Assert.Contains("\"deduct_kitchen_ingredients\":true", message.PayloadJson);
+        Assert.Contains("\"source\":\"MANUAL_BRANCH_ENTRY\"", message.PayloadJson);
+    }
+
+    [Fact]
+    public async Task PostManualIncomingAsync_WithoutKitchenDeduction_StillPersistsAndQueuesSync()
+    {
+        await using var store = await ModuleTestStore.CreateAsync();
+        await store.Operations.OpenShiftAsync(ShiftKind.Morning, 0);
+        var command = new PostManualIncomingCommand(Guid.NewGuid(), "وارد يدوي بدون خصم", [new QuantityInput(ChocolateCakeId, 5)]);
+
+        await store.Modules.PostManualIncomingAsync(command);
+
+        await using var db = store.Database.CreateContext();
+        Assert.Equal(23, (await db.StockBalances.SingleAsync(x => x.ItemId == ChocolateCakeId)).QuantityScaled);
+        var message = await db.OutboxMessages.SingleAsync(x => x.EventId == command.CommandId);
+        Assert.Equal(OutboxState.Pending, message.State);
+        Assert.Contains("\"deduct_kitchen_ingredients\":false", message.PayloadJson);
     }
 
     [Fact]

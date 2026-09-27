@@ -94,7 +94,13 @@ export class TransferProjectionService {
     const payload = object(event.payload);
     if (id(payload.document_id) !== event.id || id(payload.site_id) !== siteId) error('WRONG_SITE', 'Manual incoming belongs to another site', 403);
     id(payload.shift_id);
-    text(payload.reason, 500);
+    const reason = text(payload.reason, 500);
+    if (payload.source !== undefined && payload.source !== 'MANUAL_BRANCH_ENTRY') error('INVALID_INVENTORY', 'Manual incoming source is invalid');
+    const deductKitchenIngredients = payload.deduct_kitchen_ingredients === true;
+    if (payload.deduct_kitchen_ingredients !== undefined && typeof payload.deduct_kitchen_ingredients !== 'boolean')
+      error('INVALID_INVENTORY', 'Kitchen ingredient deduction flag must be boolean');
+    if (deductKitchenIngredients && profile !== DeviceProfile.BRANCH_TYPE_1)
+      error('WRONG_PROFILE', 'Kitchen ingredient deduction is available to Branch Type 1 manual incoming only', 403);
     const expectedLocation = profile === DeviceProfile.BRANCH_TYPE_2 ? StockLocation.FREEZER : StockLocation.SALEABLE;
     if (payload.location !== expectedLocation) error('INVALID_INVENTORY', 'Manual incoming location does not match the branch profile');
     const rows = lines(payload.lines);
@@ -102,6 +108,40 @@ export class TransferProjectionService {
     if (new Set(itemIds).size !== rows.length) error('INVALID_INVENTORY', 'Manual incoming repeats an item');
     const catalog = await tx.item.findMany({ where: { id: { in: itemIds }, kind: ItemKind.PRODUCT, active: true }, select: { id: true } });
     if (catalog.length !== rows.length) error('DEPENDENCY_NOT_READY', 'Manual incoming contains an unknown product', 409);
+    if (deductKitchenIngredients) {
+      const kitchens = await tx.site.findMany({ where: { type: 'KITCHEN', active: true }, orderBy: { id: 'asc' }, take: 2 });
+      if (kitchens.length !== 1) error('KITCHEN_ROUTE_UNAVAILABLE', 'يجب أن يوجد مطبخ نشط واحد فقط لخصم الخامات.', 409);
+      const kitchen = kitchens[0];
+      const recipes = await tx.recipe.findMany({ where: { productItemId: { in: itemIds }, active: true },
+        include: { product: { select: { nameAr: true } }, components: true } });
+      const missing = itemIds.filter((itemId) => !recipes.some((recipe) => recipe.productItemId === itemId));
+      if (missing.length) {
+        const products = await tx.item.findMany({ where: { id: { in: missing } }, select: { nameAr: true } });
+        error('RECIPE_REQUIRED', `لا توجد وصفة فعالة للأصناف: ${products.map((item) => item.nameAr).join('، ')}`, 409);
+      }
+      const required = new Map<string, bigint>();
+      for (const row of rows) {
+        const productId = id(row.item_id), amount = quantity(row.quantity_scaled);
+        const recipe = recipes.find((value) => value.productItemId === productId)!;
+        for (const component of recipe.components) {
+          const numerator = amount * component.quantityScaled;
+          if (numerator % recipe.outputScaled !== 0n) error('RECIPE_ROUNDING', `كمية ${recipe.product.nameAr} لا تتوافق مع وحدة الوصفة.`, 409);
+          required.set(component.ingredientItemId, (required.get(component.ingredientItemId) ?? 0n) + numerator / recipe.outputScaled);
+        }
+      }
+      for (const [ingredientItemId, used] of [...required.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+        const key = { siteId: kitchen.id, itemId: ingredientItemId, location: StockLocation.KITCHEN };
+        const balance = await tx.stockBalance.findUnique({ where: { siteId_itemId_location: key }, include: { item: { select: { nameAr: true } } } });
+        if (!balance || balance.quantityScaled < used) error('INSUFFICIENT_INGREDIENTS', `رصيد خامة ${balance?.item.nameAr ?? ingredientItemId} غير كافٍ.`, 409);
+        const cost = inventoryCostForUse(balance.inventoryCostMinor, balance.quantityScaled, used);
+        await tx.stockBalance.update({ where: { siteId_itemId_location: key }, data: {
+          quantityScaled: { decrement: used }, inventoryCostMinor: { decrement: cost }, version: { increment: 1 },
+          asOfAt: new Date(event.occurred_at), sourceEventId: event.id } });
+        await tx.ingredientStockTransaction.create({ data: { id: randomUUID(), siteId: kitchen.id, itemId: ingredientItemId,
+          sourceEventId: event.id, kind: 'MANUAL_INCOMING_CONSUMPTION', quantityDeltaScaled: -used, costMinor: cost,
+          reason, occurredAt: new Date(event.occurred_at) } });
+      }
+    }
     for (const row of rows) {
       const itemId = id(row.item_id), amount = quantity(row.quantity_scaled);
       const key = { siteId, itemId, location: expectedLocation };

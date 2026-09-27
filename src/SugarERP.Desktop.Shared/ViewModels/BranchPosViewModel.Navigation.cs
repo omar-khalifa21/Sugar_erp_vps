@@ -9,6 +9,7 @@ public sealed partial class BranchPosViewModel
     private RelayCommand _showCustomOrdersCommand = null!;
     private RelayCommand _showRequestCommand = null!;
     private RelayCommand _showIncomingCommand = null!;
+    private RelayCommand _showManualIncomingCommand = null!;
     private RelayCommand _showShiftHistoryCommand = null!;
     private RelayCommand _showReturnCommand = null!;
     private RelayCommand _showCloseCommand = null!;
@@ -20,6 +21,7 @@ public sealed partial class BranchPosViewModel
     public bool IsCustomOrdersVisible => IsEnrolled && CurrentPage == BranchPage.CustomOrders;
     public bool IsRequestVisible => IsEnrolled && CurrentPage == BranchPage.Request;
     public bool IsIncomingVisible => IsEnrolled && CurrentPage == BranchPage.Incoming;
+    public bool IsManualIncomingVisible => IsEnrolled && CurrentPage == BranchPage.ManualIncoming;
     public bool IsShiftHistoryVisible => IsEnrolled && CurrentPage == BranchPage.ShiftHistory;
     public bool IsReturnVisible => IsEnrolled && CurrentPage == BranchPage.KitchenReturn;
     public bool IsCloseVisible => IsEnrolled && CurrentPage == BranchPage.CloseShift;
@@ -33,6 +35,7 @@ public sealed partial class BranchPosViewModel
         BranchPage.Catalog => "الأصناف والمخزون",
         BranchPage.Request => "وارد — طلب",
         BranchPage.Incoming => "وارد — استلام",
+        BranchPage.ManualIncoming => "وارد — إضافة يدوية",
         BranchPage.ShiftHistory => "نقطة البيع — حركات الوردية",
         BranchPage.KitchenReturn => "نقطة البيع — مرتجع للمطبخ",
         BranchPage.CloseShift => "نقطة البيع — إغلاق الوردية",
@@ -45,6 +48,7 @@ public sealed partial class BranchPosViewModel
     public ICommand ShowCustomOrdersCommand => _showCustomOrdersCommand;
     public ICommand ShowRequestCommand => _showRequestCommand;
     public ICommand ShowIncomingCommand => _showIncomingCommand;
+    public ICommand ShowManualIncomingCommand => _showManualIncomingCommand;
     public ICommand ShowShiftHistoryCommand => _showShiftHistoryCommand;
     public ICommand ShowReturnCommand => _showReturnCommand;
     public ICommand ShowCloseCommand => _showCloseCommand;
@@ -58,6 +62,7 @@ public sealed partial class BranchPosViewModel
         _showCustomOrdersCommand = BuildNavigationCommand(BranchPage.CustomOrders);
         _showRequestCommand = BuildNavigationCommand(BranchPage.Request);
         _showIncomingCommand = BuildNavigationCommand(BranchPage.Incoming);
+        _showManualIncomingCommand = BuildNavigationCommand(BranchPage.ManualIncoming);
         _showShiftHistoryCommand = BuildNavigationCommand(BranchPage.ShiftHistory);
         _showReturnCommand = BuildNavigationCommand(BranchPage.KitchenReturn);
         _showCloseCommand = BuildNavigationCommand(BranchPage.CloseShift);

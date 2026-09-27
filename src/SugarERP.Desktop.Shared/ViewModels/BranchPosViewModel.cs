@@ -676,6 +676,7 @@ public sealed partial class BranchPosViewModel : ViewModelBase
         OnPropertyChanged(nameof(IsCustomOrdersVisible));
         OnPropertyChanged(nameof(IsRequestVisible));
         OnPropertyChanged(nameof(IsIncomingVisible));
+        OnPropertyChanged(nameof(IsManualIncomingVisible));
         OnPropertyChanged(nameof(IsShiftHistoryVisible));
         OnPropertyChanged(nameof(IsReturnVisible));
         OnPropertyChanged(nameof(IsCloseVisible));

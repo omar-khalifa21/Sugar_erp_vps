@@ -148,6 +148,8 @@ public sealed class RequestHistoryRowViewModel(
     public bool IsDraft => Snapshot.Status == SugarERP.Domain.KitchenRequestStatus.Draft;
 }
 
+public sealed record ManualIncomingReviewRowViewModel(Guid ItemId, string Name, string QuantityText);
+
 public sealed class IncomingCountRowViewModel : ViewModelBase
 {
     private string _quantityText;

@@ -8,6 +8,7 @@ public enum BranchPage
     Catalog,
     Request,
     Incoming,
+    ManualIncoming,
     ShiftHistory,
     KitchenReturn,
     CloseShift,

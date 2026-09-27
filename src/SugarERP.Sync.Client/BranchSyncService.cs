@@ -388,7 +388,7 @@ public sealed class BranchSyncService(HttpClient httpClient, LocalDatabase datab
                     pending.Count,
                     0,
                     await RemainingAsync(db, cancellationToken),
-                    retryable ? FriendlyRetryableSyncError(code) : FriendlyPermanentSyncError(code),
+                    retryable ? FriendlyRetryableSyncError(code, error?.Message) : FriendlyPermanentSyncError(code),
                     false);
             }
             var result = await response.Content.ReadFromJsonAsync<PushResponse>(JsonOptions, cancellationToken)
@@ -583,11 +583,12 @@ public sealed class BranchSyncService(HttpClient httpClient, LocalDatabase datab
     private static bool IsTransient(HttpStatusCode statusCode) =>
         statusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests || (int)statusCode >= 500;
 
-    private static string FriendlyRetryableSyncError(string code) => code switch
+    private static string FriendlyRetryableSyncError(string code, string? serverMessage = null) => code switch
     {
         "SEQUENCE_GAP" => "الخادم ينتظر حركة أقدم. ستُعاد المحاولة بالترتيب.",
         "DEPENDENCY_NOT_READY" => "إحدى الحركات تعتمد على حركة لم تصل بعد. ستُعاد المحاولة بالترتيب.",
         "RATE_LIMITED" => "الخادم مشغول الآن. ستُعاد المحاولة تلقائياً بعد مهلة قصيرة.",
+        "RECIPE_REQUIRED" or "RECIPE_ROUNDING" or "INSUFFICIENT_INGREDIENTS" when !string.IsNullOrWhiteSpace(serverMessage) => serverMessage,
         "UNRECOGNIZED_SYNC_RESULT" => "أعاد الخادم حالة غير معروفة لإحدى الحركات. لم يتم تأكيدها وستُعاد المحاولة بأمان.",
         "INCOMPLETE_SYNC_RESPONSE" or "DUPLICATE_SYNC_RESULT" or "INVALID_SYNC_RESPONSE" =>
             "وصل رد مزامنة غير مكتمل. تم تأكيد الحركات الموثقة فقط وستُعاد محاولة الباقي بأمان.",
@@ -654,6 +655,9 @@ public sealed class BranchSyncService(HttpClient httpClient, LocalDatabase datab
     {
         [JsonPropertyName("code")]
         public string Code { get; init; } = "SYNC_REJECTED";
+
+        [JsonPropertyName("message")]
+        public string? Message { get; init; }
 
         [JsonPropertyName("retryable")]
         public bool? Retryable { get; init; }

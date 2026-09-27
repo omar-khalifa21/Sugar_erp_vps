@@ -206,6 +206,8 @@ export interface User {
 
 export interface BranchOverview {
   site: Site;
+  manual_incoming: Array<{ id: string; occurred_at: string; source: 'MANUAL_BRANCH_ENTRY'; reason: string;
+    kitchen_ingredients: 'DEDUCTED' | 'NOT_REQUESTED' | 'PENDING'; lines: Array<{ item_id: string; quantity_scaled: string }> }>;
   inventory_history: Array<{ id: string; reference_id: string; kind: string; reason: string; user_name: string; occurred_at: string;
     lines: Array<{ item_id: string; name_ar: string; unit: string; quantity_scale: number; location: 'FREEZER' | 'DISPLAY' | 'SALEABLE' | 'HOLD' | 'KITCHEN' | 'TRANSIT'; delta_scaled: string }> }>;
   freshness: { as_of: string | null; stale: boolean };

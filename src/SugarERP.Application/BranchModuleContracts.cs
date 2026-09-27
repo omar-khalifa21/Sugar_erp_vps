@@ -100,7 +100,8 @@ public sealed record PostManualIncomingCommand(
     string Reason,
     IReadOnlyList<QuantityInput> Lines,
     Guid? UserId = null,
-    string? Authorization = null);
+    string? Authorization = null,
+    bool DeductKitchenIngredients = false);
 public sealed record ManualIncomingResult(Guid DocumentId, bool WasAlreadyCommitted);
 
 public sealed record DispatchKitchenReturnCommand(Guid CommandId, string Reason, IReadOnlyList<QuantityInput> Lines, Guid? UserId = null, string? Authorization = null);
