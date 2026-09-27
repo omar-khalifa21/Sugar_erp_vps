@@ -28,6 +28,7 @@ Implementation commit: `b8c267ae7bd1c1f7d81a7d1e78928eb4c7f3b071`
 
 - Branch 1 Release tests: 90/90 passed.
 - Server unit tests: 23/23 passed.
+- Server PostgreSQL integration tests: 11/11 passed against a disposable isolated database on the VPS; the database was dropped after the run.
 - Changed server files pass ESLint and server typecheck.
 - Admin production build passed.
 - Existing `KitchenRequestSyncFlowTests` passed.
@@ -39,9 +40,9 @@ Implementation commit: `b8c267ae7bd1c1f7d81a7d1e78928eb4c7f3b071`
 - Downloaded installer reports product `Sugar ERP Branch1 Touch`, file version `1.2.11`.
 - The real Touch updater class, configured as installed version 1.2.10, detected production version 1.2.11.
 
-## Unverified gate
+## Environment note
 
-Local PostgreSQL integration tests were attempted but did not start because Docker Desktop was not running on the Windows workstation. Production migration/readiness checks passed, but this is not represented as a passed local integration suite.
+Docker Desktop was unavailable on the Windows workstation, so PostgreSQL integration was verified against a disposable isolated VPS database rather than locally. Production data was not used by the tests.
 
 ## Repository/deployment state
 
