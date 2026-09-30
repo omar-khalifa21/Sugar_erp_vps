@@ -11,9 +11,9 @@
     <Project Path="src/SugarERP.Infrastructure.Local/SugarERP.Infrastructure.Local.csproj" />
     <Project Path="src/SugarERP.Sync.Client/SugarERP.Sync.Client.csproj" />
     <Project Path="src/SugarERP.Kitchen/SugarERP.Kitchen.csproj" />
-    <Project Path="src/SugarERP.Branch2/SugarERP.Branch2.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/SugarERP.Branch1.Tests/SugarERP.Branch1.Tests.csproj" />
+    <Project Path="tests/SugarERP.Branch2.Tests/SugarERP.Branch2.Tests.csproj" />
   </Folder>
 </Solution>

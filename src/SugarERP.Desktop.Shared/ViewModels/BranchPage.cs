@@ -6,6 +6,7 @@ public enum BranchPage
     Pos,
     CustomOrders,
     Catalog,
+    DisplayStock,
     Request,
     Incoming,
     ManualIncoming,

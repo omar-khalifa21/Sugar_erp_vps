@@ -13,6 +13,7 @@ public sealed partial class BranchPosViewModel : ViewModelBase
     private readonly IBranchPrinter _printer;
     private readonly IEnrollmentClient _enrollmentClient;
     private readonly IBranchSyncService _syncService;
+    private readonly DeviceProfile _expectedProfile;
     private readonly string _appVersion;
     private readonly AsyncRelayCommand _openShiftCommand;
     private readonly AsyncRelayCommand _startMorningShiftCommand;
@@ -49,6 +50,7 @@ public sealed partial class BranchPosViewModel : ViewModelBase
     private bool _isTakeaway = true;
     private bool _isSubmittingSale;
     private BranchPage _currentPage = BranchPage.Menu;
+    private Guid? _deviceWriterId;
 
     public BranchPosViewModel(
         IBranchOperations operations,
@@ -57,7 +59,8 @@ public sealed partial class BranchPosViewModel : ViewModelBase
         IBranchPrinter printer,
         IEnrollmentClient enrollmentClient,
         IBranchSyncService syncService,
-        string? appVersion = null)
+        string? appVersion = null,
+        DeviceProfile expectedProfile = DeviceProfile.BranchType1)
     {
         _operations = operations;
         _printer = printer;
@@ -65,7 +68,13 @@ public sealed partial class BranchPosViewModel : ViewModelBase
         _shiftReportWriter = shiftReportWriter;
         _enrollmentClient = enrollmentClient;
         _syncService = syncService;
+        _expectedProfile = expectedProfile;
         _appVersion = string.IsNullOrWhiteSpace(appVersion) ? "1.0.0" : appVersion;
+        _apiBaseUrl = DeploymentConfiguration.Create(
+            expectedProfile == DeviceProfile.BranchType2
+                ? DesktopApplicationType.BranchType2
+                : DesktopApplicationType.BranchType1).ApiBaseUrl.ToString().TrimEnd('/');
+        _siteName = expectedProfile == DeviceProfile.BranchType2 ? "فرع نوع ٢" : "فرع نوع ١";
 
         _openShiftCommand = new AsyncRelayCommand(OpenShiftAsync, CanOpenShift);
         _startMorningShiftCommand = new AsyncRelayCommand(
@@ -129,6 +138,7 @@ public sealed partial class BranchPosViewModel : ViewModelBase
     }
 
     public bool NeedsShift => IsEnrolled && !IsShiftOpen;
+    public bool IsBranchType2 => _expectedProfile == DeviceProfile.BranchType2;
     public bool IsMenuVisible => CurrentPage == BranchPage.Menu;
     public bool IsPosVisible => IsEnrolled && IsShiftOpen && CurrentPage == BranchPage.Pos;
     public bool CanReturnToMain => CurrentPage != BranchPage.Menu;
@@ -441,7 +451,9 @@ public sealed partial class BranchPosViewModel : ViewModelBase
                 IsCash ? PaymentMethod.Cash : PaymentMethod.Visa,
                 IsTakeaway ? FulfillmentKind.Takeaway : FulfillmentKind.Table,
                 discount,
-                tip);
+                tip,
+                DeviceWriterId,
+                DeviceWriterAuthorization);
             var receipt = await _operations.CompleteSaleAsync(command);
             _lastReceiptId = receipt.Id;
             _reprintLastReceiptCommand.NotifyCanExecuteChanged();
@@ -514,7 +526,7 @@ public sealed partial class BranchPosViewModel : ViewModelBase
         {
             var keyMaterial = RandomNumberGenerator.GetBytes(32);
             var thumbprint = Convert.ToHexStringLower(SHA256.HashData(keyMaterial));
-            var command = new EnrollmentCommand(uri, EnrollmentToken.Trim(), DeviceName.Trim(), thumbprint, _appVersion, TouchMode, DeviceProfile.BranchType1);
+            var command = new EnrollmentCommand(uri, EnrollmentToken.Trim(), DeviceName.Trim(), thumbprint, _appVersion, TouchMode, _expectedProfile);
             var result = await _enrollmentClient.EnrollAsync(command);
             await _operations.SaveEnrollmentAsync(command, result);
             EnrollmentToken = string.Empty;
@@ -567,7 +579,8 @@ public sealed partial class BranchPosViewModel : ViewModelBase
     {
         var snapshot = await _operations.GetSnapshotAsync();
         NeedsEnrollment = snapshot.Configuration is null;
-        SiteName = snapshot.Configuration?.SiteName ?? "فرع نوع ١";
+        SiteName = snapshot.Configuration?.SiteName ?? (IsBranchType2 ? "فرع نوع ٢" : "فرع نوع ١");
+        _deviceWriterId = snapshot.Configuration?.DeviceId;
         if (snapshot.Configuration is not null)
             ApiBaseUrl = snapshot.Configuration.ApiBaseUrl;
         IsShiftOpen = snapshot.OpenShift is not null;
@@ -656,6 +669,12 @@ public sealed partial class BranchPosViewModel : ViewModelBase
 
     private void DismissReceipt() => HasReceipt = false;
 
+    private Guid? DeviceWriterId => IsBranchType2 ? _deviceWriterId : null;
+
+    private string? DeviceWriterAuthorization => DeviceWriterId is { } deviceId
+        ? $"device-writer:{deviceId:N}"
+        : null;
+
     private void NotifyCommandState()
     {
         _openShiftCommand.NotifyCanExecuteChanged();
@@ -672,7 +691,9 @@ public sealed partial class BranchPosViewModel : ViewModelBase
     {
         OnPropertyChanged(nameof(IsMenuVisible));
         OnPropertyChanged(nameof(IsPosVisible));
+        OnPropertyChanged(nameof(IsBranchType2));
         OnPropertyChanged(nameof(IsCatalogVisible));
+        OnPropertyChanged(nameof(IsDisplayStockVisible));
         OnPropertyChanged(nameof(IsCustomOrdersVisible));
         OnPropertyChanged(nameof(IsRequestVisible));
         OnPropertyChanged(nameof(IsIncomingVisible));

@@ -263,9 +263,56 @@ public sealed class BranchOperationsService(LocalDatabase database) : IBranchOpe
         }
     }
 
+    public async Task<IReadOnlyList<DisplayStockSnapshot>> GetDisplayStockAsync(CancellationToken cancellationToken = default)
+    {
+        await using var db = database.CreateContext();
+        var configuration = await db.DeviceConfigurations.AsNoTracking().SingleOrDefaultAsync(cancellationToken)
+            ?? throw new BusinessRuleException("DEVICE_NOT_ENROLLED", "سجّل جهاز الفرع أولاً.");
+        if (configuration.Profile != DeviceProfile.BranchType2)
+            throw new BusinessRuleException("WRONG_PROFILE", "هذه الشاشة متاحة لفرع نوع ٢ فقط.");
+
+        var items = await db.CatalogItems.AsNoTracking().OrderBy(value => value.NameAr).ToListAsync(cancellationToken);
+        var balances = await db.LocationBalances.AsNoTracking().ToListAsync(cancellationToken);
+        return items
+            .Where(item => item.Active || balances.Any(value => value.ItemId == item.Id && value.QuantityScaled != 0))
+            .Select(item => new DisplayStockSnapshot(
+                item.Id,
+                item.NameAr,
+                item.Unit,
+                item.QuantityScale,
+                balances.SingleOrDefault(value => value.ItemId == item.Id && value.Location == BranchInventoryLocation.Stock)?.QuantityScaled ?? 0,
+                balances.SingleOrDefault(value => value.ItemId == item.Id && value.Location == BranchInventoryLocation.Display)?.QuantityScaled ?? 0))
+            .ToArray();
+    }
+
+    public async Task MoveStockToDisplayAsync(MoveStockToDisplayCommand command, CancellationToken cancellationToken = default)
+    {
+        if (command.CommandId == Guid.Empty || command.ItemId == Guid.Empty || command.QuantityScaled <= 0)
+            throw new BusinessRuleException("INVALID_DISPLAY_TRANSFER", "اختر صنفاً وأدخل كمية صحيحة للعرض.");
+
+        await using var db = database.CreateContext();
+        var configuration = await db.DeviceConfigurations.AsNoTracking().SingleOrDefaultAsync(cancellationToken)
+            ?? throw new BusinessRuleException("DEVICE_NOT_ENROLLED", "سجّل جهاز الفرع أولاً.");
+        if (configuration.Profile != DeviceProfile.BranchType2)
+            throw new BusinessRuleException("WRONG_PROFILE", "هذه الحركة متاحة لفرع نوع ٢ فقط.");
+
+        await new Branch2InventoryService(database).ExecuteAsync(
+            new Branch2InventoryCommand(
+                command.CommandId,
+                command.CommandId,
+                configuration.DeviceId,
+                Branch2TransactionKind.StockToDisplay,
+                new Dictionary<Guid, long> { [command.ItemId] = command.QuantityScaled },
+                string.IsNullOrWhiteSpace(command.Reason) ? "نقل إلى العرض" : command.Reason.Trim(),
+                $"device-writer:{configuration.DeviceId:N}"),
+            cancellationToken);
+    }
+
     public async Task SaveEnrollmentAsync(EnrollmentCommand command, EnrollmentResult result, CancellationToken cancellationToken = default)
     {
-        if (result.Profile != DeviceProfile.BranchType1) throw new BusinessRuleException("WRONG_PROFILE", "رمز التسجيل ليس مخصصاً لفرع نوع ١.");
+        if (result.Profile is not (DeviceProfile.BranchType1 or DeviceProfile.BranchType2)
+            || command.ExpectedProfile is not null && result.Profile != command.ExpectedProfile)
+            throw new BusinessRuleException("WRONG_PROFILE", "رمز التسجيل لا يطابق نوع الفرع المطلوب.");
         await database.WriteLock.WaitAsync(cancellationToken);
         try
         {
@@ -283,7 +330,7 @@ public sealed class BranchOperationsService(LocalDatabase database) : IBranchOpe
             configuration.SiteId = result.SiteId;
             configuration.DeviceId = result.DeviceId;
             configuration.Profile = result.Profile;
-            configuration.SiteName = "فرع نوع ١";
+            configuration.SiteName = result.Profile == DeviceProfile.BranchType2 ? "فرع نوع ٢" : "فرع نوع ١";
             configuration.ApiBaseUrl = command.ApiBaseUrl.ToString().TrimEnd('/');
             configuration.DeviceCredential = DeviceCredentialProtector.Protect(result.Credential);
             configuration.StreamEpoch = result.StreamEpoch;

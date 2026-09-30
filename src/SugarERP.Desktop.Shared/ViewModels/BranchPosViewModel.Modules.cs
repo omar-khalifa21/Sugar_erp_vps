@@ -34,6 +34,7 @@ public sealed partial class BranchPosViewModel
     private AsyncRelayCommand _saveCatalogItemCommand = null!;
     private AsyncRelayCommand _archiveCatalogItemCommand = null!;
     private AsyncRelayCommand _deleteCatalogItemCommand = null!;
+    private AsyncRelayCommand<DisplayStockRowViewModel> _moveStockToDisplayCommand = null!;
     private RelayCommand _newCatalogItemCommand = null!;
     private RelayCommand<QuantityEntryRowViewModel> _addRequestLineCommand = null!;
     private RelayCommand<QuantityEntryRowViewModel> _addReturnLineCommand = null!;
@@ -75,6 +76,7 @@ public sealed partial class BranchPosViewModel
     private string _catalogPriceText = "0";
 
     public ObservableCollection<CatalogRowViewModel> CatalogRows { get; } = [];
+    public ObservableCollection<DisplayStockRowViewModel> DisplayStockRows { get; } = [];
     public ObservableCollection<QuantityEntryRowViewModel> RequestRows { get; } = [];
     public ObservableCollection<RequestHistoryRowViewModel> RequestHistoryRows { get; } = [];
     public ObservableCollection<IncomingRowViewModel> IncomingRows { get; } = [];
@@ -319,6 +321,7 @@ public sealed partial class BranchPosViewModel
     public ICommand SaveCatalogItemCommand => _saveCatalogItemCommand;
     public ICommand ArchiveCatalogItemCommand => _archiveCatalogItemCommand;
     public ICommand DeleteCatalogItemCommand => _deleteCatalogItemCommand;
+    public ICommand MoveStockToDisplayCommand => _moveStockToDisplayCommand;
 
     partial void InitializeModuleCommands()
     {
@@ -347,6 +350,9 @@ public sealed partial class BranchPosViewModel
         _saveCatalogItemCommand = new AsyncRelayCommand(SaveCatalogItemAsync, () => !IsBusy);
         _archiveCatalogItemCommand = new AsyncRelayCommand(ArchiveCatalogItemAsync, () => CanArchiveCatalogItem && !IsBusy);
         _deleteCatalogItemCommand = new AsyncRelayCommand(DeleteCatalogItemAsync, () => SelectedCatalogItem is not null && !IsBusy);
+        _moveStockToDisplayCommand = new AsyncRelayCommand<DisplayStockRowViewModel>(
+            MoveStockToDisplayAsync,
+            row => IsBranchType2 && row is not null && !IsBusy);
         InitializeCustomOrderCommands();
     }
 
@@ -370,6 +376,7 @@ public sealed partial class BranchPosViewModel
         _saveCatalogItemCommand.NotifyCanExecuteChanged();
         _archiveCatalogItemCommand.NotifyCanExecuteChanged();
         _deleteCatalogItemCommand.NotifyCanExecuteChanged();
+        _moveStockToDisplayCommand.NotifyCanExecuteChanged();
         NotifyCustomOrderCommandState();
         _refreshCurrentPageCommand.NotifyCanExecuteChanged();
     }
@@ -412,6 +419,9 @@ public sealed partial class BranchPosViewModel
                 case BranchPage.Catalog:
                     await LoadCatalogAsync();
                     break;
+                case BranchPage.DisplayStock:
+                    await LoadDisplayStockAsync();
+                    break;
                 case BranchPage.CustomOrders:
                     await LoadCustomOrdersAsync();
                     break;
@@ -448,6 +458,45 @@ public sealed partial class BranchPosViewModel
         catch (Exception)
         {
             StatusMessage = "تعذر تحميل هذه الشاشة. البيانات المحفوظة لم تتغير.";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task LoadDisplayStockAsync()
+    {
+        var rows = await _operations.GetDisplayStockAsync();
+        DisplayStockRows.Clear();
+        foreach (var row in rows)
+            DisplayStockRows.Add(new DisplayStockRowViewModel(row));
+    }
+
+    private async Task MoveStockToDisplayAsync(DisplayStockRowViewModel? row)
+    {
+        if (row is null) return;
+        if (!ArabicDisplay.TryParseQuantity(row.QuantityText, row.QuantityScale, true, out var quantity) || quantity <= 0)
+        {
+            StatusMessage = $"أدخل كمية صحيحة من {row.Name}.";
+            return;
+        }
+
+        IsBusy = true;
+        try
+        {
+            await _operations.MoveStockToDisplayAsync(new MoveStockToDisplayCommand(
+                Guid.NewGuid(),
+                row.ItemId,
+                quantity,
+                row.Reason));
+            await LoadDisplayStockAsync();
+            await RefreshSnapshotAsync();
+            StatusMessage = $"تم نقل {ArabicDisplay.Quantity(quantity, row.QuantityScale, row.Unit)} من المخزون إلى العرض.";
+        }
+        catch (BusinessRuleException exception)
+        {
+            StatusMessage = exception.UserMessage;
         }
         finally
         {
@@ -741,8 +790,12 @@ public sealed partial class BranchPosViewModel
         try
         {
             await _moduleOperations.PostManualIncomingAsync(new PostManualIncomingCommand(
-                Guid.NewGuid(), null, _pendingManualIncomingLines,
-                DeductKitchenIngredients: DeductKitchenIngredients));
+                Guid.NewGuid(),
+                null,
+                _pendingManualIncomingLines,
+                DeviceWriterId,
+                DeviceWriterAuthorization,
+                DeductKitchenIngredients));
             ClearQuantities(ManualIncomingRows);
             DeductKitchenIngredients = false;
             ManualIncomingReviewRows.Clear();
@@ -803,7 +856,13 @@ public sealed partial class BranchPosViewModel
         IsBusy = true;
         try
         {
-            var result = await _moduleOperations.ReceiveShipmentAsync(new ReceiveShipmentCommand(Guid.NewGuid(), shipment.Id, shipment.Version, counts));
+            var result = await _moduleOperations.ReceiveShipmentAsync(new ReceiveShipmentCommand(
+                Guid.NewGuid(),
+                shipment.Id,
+                shipment.Version,
+                counts,
+                DeviceWriterId,
+                DeviceWriterAuthorization));
             await LoadIncomingAsync();
             await RefreshSnapshotAsync();
             IncomingStatusText = result.EntireShipmentHeld
@@ -941,7 +1000,12 @@ public sealed partial class BranchPosViewModel
         IsBusy = true;
         try
         {
-            var result = await _moduleOperations.DispatchKitchenReturnAsync(new DispatchKitchenReturnCommand(Guid.NewGuid(), ReturnReason, lines));
+            var result = await _moduleOperations.DispatchKitchenReturnAsync(new DispatchKitchenReturnCommand(
+                Guid.NewGuid(),
+                ReturnReason,
+                lines,
+                DeviceWriterId,
+                DeviceWriterAuthorization));
             ReturnReason = string.Empty;
             await LoadReturnAsync();
             await RefreshSnapshotAsync();
@@ -1036,7 +1100,12 @@ public sealed partial class BranchPosViewModel
         IsBusy = true;
         try
         {
-            var result = await _moduleOperations.CloseShiftAsync(new CloseShiftCommand(Guid.NewGuid(), counts, actualCash));
+            var result = await _moduleOperations.CloseShiftAsync(new CloseShiftCommand(
+                Guid.NewGuid(),
+                counts,
+                actualCash,
+                DeviceWriterId,
+                DeviceWriterAuthorization));
             try
             {
                 if (string.IsNullOrWhiteSpace(ExportDirectory))

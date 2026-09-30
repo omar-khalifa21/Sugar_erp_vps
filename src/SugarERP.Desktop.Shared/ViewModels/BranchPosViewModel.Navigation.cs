@@ -6,6 +6,7 @@ namespace SugarERP.Desktop.Shared.ViewModels;
 public sealed partial class BranchPosViewModel
 {
     private RelayCommand _showCatalogCommand = null!;
+    private RelayCommand _showDisplayStockCommand = null!;
     private RelayCommand _showCustomOrdersCommand = null!;
     private RelayCommand _showRequestCommand = null!;
     private RelayCommand _showIncomingCommand = null!;
@@ -18,6 +19,7 @@ public sealed partial class BranchPosViewModel
     private AsyncRelayCommand _refreshCurrentPageCommand = null!;
 
     public bool IsCatalogVisible => IsEnrolled && CurrentPage == BranchPage.Catalog;
+    public bool IsDisplayStockVisible => IsEnrolled && IsBranchType2 && CurrentPage == BranchPage.DisplayStock;
     public bool IsCustomOrdersVisible => IsEnrolled && CurrentPage == BranchPage.CustomOrders;
     public bool IsRequestVisible => IsEnrolled && CurrentPage == BranchPage.Request;
     public bool IsIncomingVisible => IsEnrolled && CurrentPage == BranchPage.Incoming;
@@ -33,6 +35,7 @@ public sealed partial class BranchPosViewModel
         BranchPage.Pos => "نقطة البيع",
         BranchPage.CustomOrders => "الطلبات الخاصة",
         BranchPage.Catalog => "الأصناف والمخزون",
+        BranchPage.DisplayStock => "المخزون والعرض",
         BranchPage.Request => "وارد — طلب",
         BranchPage.Incoming => "وارد — استلام",
         BranchPage.ManualIncoming => "وارد — إضافة يدوية",
@@ -45,6 +48,7 @@ public sealed partial class BranchPosViewModel
     };
 
     public ICommand ShowCatalogCommand => _showCatalogCommand;
+    public ICommand ShowDisplayStockCommand => _showDisplayStockCommand;
     public ICommand ShowCustomOrdersCommand => _showCustomOrdersCommand;
     public ICommand ShowRequestCommand => _showRequestCommand;
     public ICommand ShowIncomingCommand => _showIncomingCommand;
@@ -59,6 +63,7 @@ public sealed partial class BranchPosViewModel
     private void InitializeModuleNavigation()
     {
         _showCatalogCommand = BuildNavigationCommand(BranchPage.Catalog);
+        _showDisplayStockCommand = BuildNavigationCommand(BranchPage.DisplayStock);
         _showCustomOrdersCommand = BuildNavigationCommand(BranchPage.CustomOrders);
         _showRequestCommand = BuildNavigationCommand(BranchPage.Request);
         _showIncomingCommand = BuildNavigationCommand(BranchPage.Incoming);

@@ -53,6 +53,20 @@ public sealed record SaleReceipt(
     DateTimeOffset OccurredAtUtc,
     bool WasAlreadyCommitted);
 
+public sealed record DisplayStockSnapshot(
+    Guid ItemId,
+    string NameAr,
+    string Unit,
+    int QuantityScale,
+    long StockQuantityScaled,
+    long DisplayQuantityScaled);
+
+public sealed record MoveStockToDisplayCommand(
+    Guid CommandId,
+    Guid ItemId,
+    long QuantityScaled,
+    string Reason);
+
 public sealed record EnrollmentCommand(
     Uri ApiBaseUrl,
     string EnrollmentToken,
@@ -75,6 +89,8 @@ public interface IBranchOperations
     Task<BranchSnapshot> GetSnapshotAsync(CancellationToken cancellationToken = default);
     Task<OpenShiftSnapshot> OpenShiftAsync(ShiftKind kind, long openingCashMinor, CancellationToken cancellationToken = default);
     Task<SaleReceipt> CompleteSaleAsync(CompleteSaleCommand command, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<DisplayStockSnapshot>> GetDisplayStockAsync(CancellationToken cancellationToken = default);
+    Task MoveStockToDisplayAsync(MoveStockToDisplayCommand command, CancellationToken cancellationToken = default);
     Task SaveEnrollmentAsync(EnrollmentCommand command, EnrollmentResult result, CancellationToken cancellationToken = default);
     Task ClearEnrollmentAsync(CancellationToken cancellationToken = default);
     Task SetTouchModeAsync(bool enabled, CancellationToken cancellationToken = default);

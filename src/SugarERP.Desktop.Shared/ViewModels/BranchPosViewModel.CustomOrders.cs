@@ -342,7 +342,13 @@ public sealed partial class BranchPosViewModel
         try
         {
             var cafeId = SelectedCafe.Id;
-            var updated = await _moduleOperations.ChangeCustomOrderStatusAsync(new ChangeCustomOrderStatusCommand(Guid.NewGuid(), SelectedCustomOrder.Id, SelectedCustomOrder.Snapshot.Version, status));
+            var updated = await _moduleOperations.ChangeCustomOrderStatusAsync(new ChangeCustomOrderStatusCommand(
+                Guid.NewGuid(),
+                SelectedCustomOrder.Id,
+                SelectedCustomOrder.Snapshot.Version,
+                status,
+                DeviceWriterId,
+                DeviceWriterAuthorization));
             await LoadCafeDetailsAsync(cafeId);
             SelectedCustomOrder = CustomOrderRows.FirstOrDefault(value => value.Id == updated.Id);
             if (status == CustomOrderStatus.Confirmed)

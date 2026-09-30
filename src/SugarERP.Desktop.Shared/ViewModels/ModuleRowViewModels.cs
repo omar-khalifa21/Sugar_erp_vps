@@ -77,6 +77,41 @@ public sealed class QuantityEntryRowViewModel : ViewModelBase
     }
 }
 
+public sealed class DisplayStockRowViewModel : ViewModelBase
+{
+    private string _quantityText = "0";
+    private string _reason = "نقل إلى العرض";
+
+    public DisplayStockRowViewModel(DisplayStockSnapshot snapshot)
+    {
+        Snapshot = snapshot;
+    }
+
+    public DisplayStockSnapshot Snapshot { get; }
+    public Guid ItemId => Snapshot.ItemId;
+    public string Name => Snapshot.NameAr;
+    public string Unit => Snapshot.Unit;
+    public int QuantityScale => Snapshot.QuantityScale;
+    public string StockText => ArabicDisplay.Quantity(Snapshot.StockQuantityScaled, Snapshot.QuantityScale, Snapshot.Unit);
+    public string DisplayText => ArabicDisplay.Quantity(Snapshot.DisplayQuantityScaled, Snapshot.QuantityScale, Snapshot.Unit);
+    public string TotalText => ArabicDisplay.Quantity(
+        checked(Snapshot.StockQuantityScaled + Snapshot.DisplayQuantityScaled),
+        Snapshot.QuantityScale,
+        Snapshot.Unit);
+
+    public string QuantityText
+    {
+        get => _quantityText;
+        set => SetProperty(ref _quantityText, value);
+    }
+
+    public string Reason
+    {
+        get => _reason;
+        set => SetProperty(ref _reason, value);
+    }
+}
+
 public sealed class IncomingRowViewModel(
     IncomingShipmentSnapshot snapshot,
     string reference,
