@@ -25,5 +25,14 @@
     "prisma:generate": "npm run prisma:generate --workspace @sugar-erp/server",
     "prisma:migrate:deploy": "npm run prisma:migrate:deploy --workspace @sugar-erp/server",
     "bootstrap:admin": "npm run bootstrap:admin --workspace @sugar-erp/server"
+  },
+  "overrides": {
+    "@prisma/config": {
+      "deepmerge-ts": "8.0.2",
+      "effect": "3.20.0"
+    },
+    "@istanbuljs/load-nyc-config": {
+      "js-yaml": "4.3.2"
+    }
   }
 }

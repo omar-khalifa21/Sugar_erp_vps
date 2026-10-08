@@ -763,12 +763,12 @@ export class TransferProjectionService {
       include: { siteRoles: { where: { OR: [{ siteId }, { siteId: null }], role: { active: true } }, include: { role: true } } } });
     if (!user?.siteRoles.some((assignment) => assignment.role.permissions.some((permission) => ['*', 'inventory.write'].includes(permission))))
       error('FORBIDDEN', 'The operator has no inventory permission for this branch', 403);
-    const rows = lines(payload.lines).map((row) => {
+    const rows = lines(payload.lines).map((row): { itemId: string; location: StockLocation; deltaScaled: bigint } => {
       if (row.location !== 'FREEZER' && row.location !== 'DISPLAY') error('INVALID_INVENTORY', 'Branch Type 2 location must be stock or display');
       if (typeof row.delta_scaled !== 'string' || !/^-?[1-9]\d*$/.test(row.delta_scaled)) error('INVALID_INVENTORY', 'Inventory delta must be a nonzero integer');
       const delta = BigInt(row.delta_scaled);
       if (delta < -9_223_372_036_854_775_807n || delta > 9_223_372_036_854_775_807n) error('INVALID_INVENTORY', 'Inventory delta is out of range');
-      return { itemId: id(row.item_id), location: row.location as StockLocation, deltaScaled: delta };
+      return { itemId: id(row.item_id), location: row.location, deltaScaled: delta };
     });
     if (new Set(rows.map((row) => `${row.itemId}:${row.location}`)).size !== rows.length) error('INVALID_INVENTORY', 'Inventory operation repeats a location');
     const items = new Set(rows.map((row) => row.itemId));

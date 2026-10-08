@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { DeviceProfile, EnrollmentStatus, Item, ItemKind, Prisma } from '@prisma/client';
+import { EnrollmentStatus, Item, ItemKind, Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateItemDto } from './create-item.dto';
@@ -118,7 +118,7 @@ export class ItemsService {
         device = await transaction.device.create({
           data: {
             siteId: site.id,
-            profile: site.type as DeviceProfile,
+            profile: site.type,
             enrollmentStatus: EnrollmentStatus.ENROLLED,
             activeWriter: false,
             name: '__SERVER_SYNC__',
