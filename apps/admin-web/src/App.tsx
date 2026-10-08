@@ -1,3 +1,4 @@
+import { UserAccountActions, type UserAccountActionProps } from './UserAccountActions';
 import {
   AlertTriangle,
   Boxes,
@@ -153,7 +154,7 @@ function LoginScreen({ onSignIn }: { onSignIn: (token: string, status: string) =
     try {
       if (signingUp) {
         await api.signup({ username, displayName, password });
-        setNotice('تم إنشاء الحساب. سجّل الدخول وانتظر موافقة المسؤول.');
+        setNotice('تم استلام الطلب. الحسابات الجديدة تنتظر موافقة المسؤول قبل تسجيل الدخول.');
         setSigningUp(false);
         setPassword('');
       } else {
@@ -225,19 +226,22 @@ function AdminApp({ token, onSignOut }: { token: string; onSignOut: () => void }
   const [lastLoaded, setLastLoaded] = useState<Date | null>(null);
   const [selectedSiteId, setSelectedSiteId] = useState<string | null>(null);
   const [toast, setToast] = useState('');
+  const [currentUserId, setCurrentUserId] = useState('');
 
   const loadData = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
-      const [sites, devices, items, users, roles] = await Promise.all([
+      const [sites, devices, items, users, roles, session] = await Promise.all([
         api.sites(token),
         api.devices(token),
         api.items(token),
         api.users(token),
         api.roles(token),
+        api.session(token),
       ]);
       setData({ sites, devices, items, users, roles });
+      setCurrentUserId(session.id);
       setLastLoaded(new Date());
     } catch (caught) {
       if (caught instanceof ApiError && caught.status === 401) {
@@ -320,6 +324,18 @@ function AdminApp({ token, onSignOut }: { token: string; onSignOut: () => void }
     const user = await api.archiveUser(token, id);
     setData((current) => ({ ...current, users: current.users.map((entry) => entry.id === id ? user : entry) }));
     setToast('تم إيقاف المستخدم مع الاحتفاظ بسجله');
+  };
+
+  const approveUser = async (id: string, input: { roleId: string; siteId?: string }) => {
+    const user = await api.approveUser(token, id, input);
+    setData((current) => ({ ...current, users: current.users.map((entry) => entry.id === id ? user : entry) }));
+    setToast('تمت الموافقة على الحساب');
+  };
+
+  const deleteUser = async (id: string, confirmation: string, reject: boolean) => {
+    await api.deleteUser(token, id, confirmation, reject);
+    setData((current) => ({ ...current, users: current.users.filter((entry) => entry.id !== id) }));
+    setToast(reject ? 'تم رفض الطلب وحذف الحساب' : 'تم حذف الحساب نهائياً مع حفظ سجل العمليات');
   };
 
   const createRole = async (input: { code: string; name: string; permissions: string[] }) => {
@@ -411,6 +427,7 @@ function AdminApp({ token, onSignOut }: { token: string; onSignOut: () => void }
           <button className="icon-button mobile-menu" onClick={() => setMenuOpen(true)} aria-label="فتح القائمة"><Menu /></button>
           <div className="page-heading"><h1>{pageTitles[page].title}</h1><p>{pageTitles[page].subtitle}</p></div>
           <div className="topbar-actions">
+            {data.users.some((user) => user.status === 'PENDING_PERMISSION') && <button className="secondary-button" onClick={() => navigate('team')}>طلبات معلقة <span className="pill warning">{data.users.filter((user) => user.status === 'PENDING_PERMISSION').length}</span></button>}
             <button className={`touch-toggle ${touchMode ? 'active' : ''}`} onClick={() => setTouchMode((current) => !current)} aria-pressed={touchMode}>
               <Smartphone size={18} /><span>وضع اللمس</span>
             </button>
@@ -434,6 +451,9 @@ function AdminApp({ token, onSignOut }: { token: string; onSignOut: () => void }
               onCreateUser={createUser}
               onUpdateUser={updateUser}
               onArchiveUser={archiveUser}
+              onApproveUser={approveUser}
+              onDeleteUser={deleteUser}
+              currentUserId={currentUserId}
               onCreateRole={createRole}
               onUpdateRole={updateRole}
               onArchiveRole={archiveRole}
@@ -461,7 +481,7 @@ function AdminApp({ token, onSignOut }: { token: string; onSignOut: () => void }
   );
 }
 
-function PageContent({ page, data, lastLoaded, onCreateSite, onUpdateSite, onArchiveSite, onCreateItem, onUpdateItem, onArchiveItem, onCreateUser, onUpdateUser, onArchiveUser, onCreateRole, onUpdateRole, onArchiveRole, onIssueEnrollmentToken, onDisableDevice, onLoadBranchOverview, onRequestStockAdjustment, onLoadCafeOverview, onCreateCafeCustomer, onUpdateCafeCustomer, onArchiveCafeCustomer, onSetCafePrice, onLoadKitchenOverview, onLoadConflicts, onDecideConflict, onNavigate, selectedSiteId, onSelectSite, token }: {
+function PageContent({ page, data, lastLoaded, onCreateSite, onUpdateSite, onArchiveSite, onCreateItem, onUpdateItem, onArchiveItem, onCreateUser, onUpdateUser, onArchiveUser, onCreateRole, onUpdateRole, onArchiveRole, onIssueEnrollmentToken, onDisableDevice, onLoadBranchOverview, onRequestStockAdjustment, onLoadCafeOverview, onCreateCafeCustomer, onUpdateCafeCustomer, onArchiveCafeCustomer, onSetCafePrice, onLoadKitchenOverview, onLoadConflicts, onDecideConflict, onNavigate, selectedSiteId, onSelectSite, token, currentUserId, onApproveUser, onDeleteUser }: UserAccountActionProps & {
   token: string;
   page: PageKey;
   data: AdminData;
@@ -501,7 +521,7 @@ function PageContent({ page, data, lastLoaded, onCreateSite, onUpdateSite, onArc
     case 'kitchen': return <KitchenPage data={data} onLoad={onLoadKitchenOverview} token={token} />;
     case 'conflicts': return <ConflictsPage onLoad={onLoadConflicts} onDecide={onDecideConflict} />;
     case 'catalog': return <CatalogPage items={data.items} onCreate={onCreateItem} onUpdate={onUpdateItem} onArchive={onArchiveItem} />;
-    case 'team': return <TeamPage users={data.users} roles={data.roles} sites={data.sites} onCreateUser={onCreateUser} onUpdateUser={onUpdateUser} onArchiveUser={onArchiveUser} onCreateRole={onCreateRole} onUpdateRole={onUpdateRole} onArchiveRole={onArchiveRole} />;
+    case 'team': return <TeamPage currentUserId={currentUserId} onApproveUser={onApproveUser} onDeleteUser={onDeleteUser} users={data.users} roles={data.roles} sites={data.sites} onCreateUser={onCreateUser} onUpdateUser={onUpdateUser} onArchiveUser={onArchiveUser} onCreateRole={onCreateRole} onUpdateRole={onUpdateRole} onArchiveRole={onArchiveRole} />;
     case 'operations': return <OperationsPage data={data} onIssueEnrollmentToken={onIssueEnrollmentToken} onDisableDevice={onDisableDevice} token={token} />;
   }
 }
@@ -869,7 +889,7 @@ function ConflictsPage({ onLoad, onDecide }: { onLoad: () => Promise<QuantityCon
   return <div className="page-stack">{message && <div className="form-error" role="alert">{message}</div>}{!conflicts ? <div className="panel mini-loading"><RefreshCw className="spin" /> جارٍ تحميل التعارضات…</div> : <section className="conflict-tiles">{conflicts.map((conflict) => <button key={conflict.id} onClick={() => choose(conflict)}><span className="cupcake-site-icon"><ClipboardCheck /></span><span><strong>{conflict.reference}</strong><small>{conflict.site.name} · {conflict.lines.length} أصناف</small></span><span className={`pill ${conflict.status === 'OPEN' ? 'danger' : conflict.status === 'PENDING_SITE_APPLY' ? 'warning' : 'success'}`}>{conflictStatusLabel(conflict.status)}</span><ChevronLeft /></button>)}{!conflicts.length && <EmptyState icon={ClipboardCheck} title="لا توجد تعارضات" text="كل الكميات المستلمة متطابقة حالياً." />}</section>}</div>;
 }
 
-function TeamPage({ users, roles, sites, onCreateUser, onUpdateUser, onArchiveUser, onCreateRole, onUpdateRole, onArchiveRole }: {
+function TeamPage({ users, roles, sites, onCreateUser, onUpdateUser, onArchiveUser, onCreateRole, onUpdateRole, onArchiveRole, currentUserId, onApproveUser, onDeleteUser }: UserAccountActionProps & {
   users: User[];
   roles: Role[];
   sites: Site[];
@@ -880,7 +900,7 @@ function TeamPage({ users, roles, sites, onCreateUser, onUpdateUser, onArchiveUs
   onUpdateRole: (id: string, input: { code?: string; name?: string; permissions?: string[]; active?: boolean }) => Promise<void>;
   onArchiveRole: (id: string) => Promise<void>;
 }) {
-  const [tab, setTab] = useState<'users' | 'roles'>('users');
+  const [tab, setTab] = useState<'users' | 'roles' | 'pending'>('users');
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [confirmId, setConfirmId] = useState<string | null>(null);
@@ -906,14 +926,14 @@ function TeamPage({ users, roles, sites, onCreateUser, onUpdateUser, onArchiveUs
   const editRole = (role: Role) => { setTab('roles'); setEditingId(role.id); setRoleForm({ code: role.code, name: role.name, permissions: role.permissions }); setShowForm(true); };
   const submitUser = async (event: FormEvent) => { event.preventDefault(); setMessage(''); if (!roles.some((role) => role.id === userForm.roleId && role.active !== false)) { setMessage('اختر دوراً صالحاً قبل الحفظ.'); return; } try { const input = { ...userForm, ...(userForm.siteId ? {} : { siteId: undefined }), ...(!editingId || changePassword ? {} : { password: undefined }) }; if (editingId) await onUpdateUser(editingId, input); else await onCreateUser({ ...userForm, ...(userForm.siteId ? {} : { siteId: undefined }) }); reset('users'); } catch (caught) { setMessage(friendlyError(caught)); } };
   const submitRole = async (event: FormEvent) => { event.preventDefault(); setMessage(''); try { if (editingId) await onUpdateRole(editingId, roleForm); else await onCreateRole(roleForm); reset('roles'); } catch (caught) { setMessage(friendlyError(caught)); } };
-  const archive = async (id: string) => { if (confirmId !== id) { setConfirmId(id); return; } setMessage(''); try { if (tab === 'users') await onArchiveUser(id); else await onArchiveRole(id); setConfirmId(null); } catch (caught) { setMessage(friendlyError(caught)); } };
+  const archive = async (id: string) => { if (confirmId !== id) { setConfirmId(id); return; } setMessage(''); try { if (tab !== 'roles') await onArchiveUser(id); else await onArchiveRole(id); setConfirmId(null); } catch (caught) { setMessage(friendlyError(caught)); } };
 
   return <div className="page-stack">
-    <div className="tab-toolbar"><div><button className={tab === 'users' ? 'active' : ''} onClick={() => reset('users')}>المستخدمون <span>{users.length}</span></button><button className={tab === 'roles' ? 'active' : ''} onClick={() => reset('roles')}>الأدوار <span>{roles.length}</span></button></div><button className="primary-button" onClick={() => { setEditingId(null); setShowForm((value) => !value); }}>{tab === 'users' ? '+ مستخدم جديد' : '+ دور جديد'}</button></div>
+    <div className="tab-toolbar"><div><button className={tab === 'users' ? 'active' : ''} onClick={() => reset('users')}>المستخدمون <span>{users.length}</span></button><button className={tab === 'pending' ? 'active' : ''} onClick={() => reset('pending')}>طلبات معلقة <span>{users.filter((user) => user.status === 'PENDING_PERMISSION').length}</span></button><button className={tab === 'roles' ? 'active' : ''} onClick={() => reset('roles')}>الأدوار <span>{roles.length}</span></button></div><button className="primary-button" onClick={() => { setEditingId(null); if (tab === 'pending') setTab('users'); setShowForm((value) => !value); }}>{tab !== 'roles' ? '+ مستخدم جديد' : '+ دور جديد'}</button></div>
     {message && <div className="form-error" role="alert">{message}</div>}
     {showForm && tab === 'users' && <form className="panel inline-form user-form" onSubmit={submitUser}><label>الاسم<input value={userForm.displayName} onChange={(event) => setUserForm({ ...userForm, displayName: event.target.value })} required /></label><label>اسم المستخدم<input className="ltr" value={userForm.username} onChange={(event) => setUserForm({ ...userForm, username: event.target.value })} required /></label>{editingId && <label><span><input type="checkbox" checked={changePassword} onChange={(event) => { setChangePassword(event.target.checked); setUserForm({ ...userForm, password: '' }); }} /> تغيير كلمة المرور</span><small>منح الصلاحيات يحافظ على كلمة المرور الحالية</small></label>}{(!editingId || changePassword) && <label>كلمة المرور الجديدة<input type="password" autoComplete="new-password" value={userForm.password} onChange={(event) => setUserForm({ ...userForm, password: event.target.value })} required minLength={12} placeholder="١٢ حرفاً على الأقل" /></label>}<label>الدور<select value={userForm.roleId} onChange={(event) => setUserForm({ ...userForm, roleId: event.target.value })} required>{roles.filter((role) => role.active !== false).map((role) => <option value={role.id} key={role.id}>{role.name}</option>)}</select></label><label>نطاق الموقع<select value={userForm.siteId} onChange={(event) => setUserForm({ ...userForm, siteId: event.target.value })}><option value="">كل المواقع</option>{sites.filter((site) => site.active).map((site) => <option value={site.id} key={site.id}>{site.name}</option>)}</select></label><button className="primary-button">{editingId ? 'حفظ' : 'إضافة'}</button></form>}
     {showForm && tab === 'roles' && <form className="panel role-editor" onSubmit={submitRole}><div className="inline-form role-name-fields"><label>الكود<input className="ltr" value={roleForm.code} onChange={(event) => setRoleForm({ ...roleForm, code: event.target.value })} required /></label><label>اسم الدور<input value={roleForm.name} onChange={(event) => setRoleForm({ ...roleForm, name: event.target.value })} required /></label></div><fieldset><legend>اختَر ما يستطيع هذا الدور فعله</legend><div className="permission-grid">{permissionOptions.map((permission) => <label key={permission.code} className={roleForm.permissions.includes(permission.code) ? 'selected' : ''}><input type="checkbox" checked={roleForm.permissions.includes(permission.code)} onChange={(event) => { const next = event.target.checked ? [...roleForm.permissions.filter((code) => permission.code === '*' || code !== '*'), permission.code] : roleForm.permissions.filter((code) => code !== permission.code); setRoleForm({ ...roleForm, permissions: permission.code === '*' && event.target.checked ? ['*'] : next }); }} /><span><strong>{permission.label}</strong><small className="ltr">{permission.code}</small></span></label>)}</div></fieldset><div className="form-actions"><button className="primary-button">{editingId ? 'حفظ الصلاحيات' : 'إضافة الدور'}</button><button type="button" className="secondary-button" onClick={() => reset('roles')}>إلغاء</button></div></form>}
-    {tab === 'users' ? <section className="panel table-panel"><PanelHeading title="المستخدمون" subtitle="حسابات مسمّاة؛ لا تُعرض كلمات المرور أو تجزئاتها" /><div className="table-wrap"><table><thead><tr><th>الاسم</th><th>اسم المستخدم</th><th>الدور</th><th>النطاق</th><th>الحالة</th><th>إجراءات</th></tr></thead><tbody>{users.map((user) => <tr key={user.id}><td><strong>{user.displayName}</strong></td><td className="ltr">{user.username}</td><td>{user.siteRoles.map((entry) => entry.role.name).join('، ') || 'بدون دور'}</td><td>{user.siteRoles.map((entry) => entry.site?.name || 'كل المواقع').join('، ') || '—'}</td><td><span className={`pill ${user.status === 'PENDING_PERMISSION' ? 'warning' : user.active ? 'success' : 'neutral'}`}>{user.status === 'PENDING_PERMISSION' ? 'بانتظار الصلاحيات' : user.active ? 'نشط' : 'موقوف'}</span></td><td><div className="row-actions"><button onClick={() => editUser(user)}>{user.status === 'PENDING_PERMISSION' ? 'منح صلاحية' : 'تعديل'}</button><button disabled={!user.active} className={confirmId === user.id ? 'confirm-delete' : ''} onClick={() => void archive(user.id)}>{confirmId === user.id ? 'تأكيد' : 'إيقاف'}</button></div></td></tr>)}</tbody></table></div></section> : <section className="panel role-list"><PanelHeading title="الأدوار والصلاحيات" subtitle="صلاحيات واضحة قابلة للتعديل وتُخزن على الخادم" />{roles.map((role) => <div key={role.id}><span className="role-icon"><ShieldCheck /></span><div className="grow"><strong>{role.name}</strong><small>{role.code}</small><div className="permission-chips">{role.permissions.includes('*') ? <span>كل صلاحيات النظام</span> : role.permissions.slice(0, 4).map((permission) => <span key={permission}>{permissionLabel(permission)}</span>)}{role.permissions.length > 4 && <span>+{role.permissions.length - 4}</span>}</div></div><span className={`pill ${role.active !== false ? 'success' : 'neutral'}`}>{role.active !== false ? 'نشط' : 'مؤرشف'}</span><div className="row-actions"><button onClick={() => editRole(role)}>تعديل</button><button disabled={role.active === false} className={confirmId === role.id ? 'confirm-delete' : ''} onClick={() => void archive(role.id)}>{confirmId === role.id ? 'تأكيد' : 'أرشفة'}</button></div></div>)}</section>}
+    {tab !== 'roles' ? <section className="panel table-panel"><PanelHeading title={tab === 'pending' ? 'طلبات التسجيل المعلقة' : 'المستخدمون'} subtitle="حسابات مسمّاة؛ لا تُعرض كلمات المرور أو تجزئاتها" /><div className="table-wrap"><table className="user-management-table"><thead><tr><th>الاسم</th><th>اسم المستخدم</th><th>الدور</th><th>النطاق</th><th>الحالة</th><th>إجراءات</th></tr></thead><tbody>{users.filter((user) => tab !== 'pending' || user.status === 'PENDING_PERMISSION').map((user) => <tr key={user.id}><td><strong>{user.displayName}</strong></td><td className="ltr">{user.username}</td><td>{user.siteRoles.map((entry) => entry.role.name).join('، ') || 'بدون دور'}</td><td>{user.siteRoles.map((entry) => entry.site?.name || 'كل المواقع').join('، ') || '—'}</td><td><span className={`pill ${user.status === 'PENDING_PERMISSION' ? 'warning' : user.active ? 'success' : 'neutral'}`}>{user.status === 'PENDING_PERMISSION' ? 'بانتظار الصلاحيات' : user.active ? 'نشط' : 'موقوف'}</span></td><td>{user.status !== 'PENDING_PERMISSION' && <div className="row-actions"><button onClick={() => editUser(user)}>تعديل</button><button disabled={!user.active} className={confirmId === user.id ? 'confirm-delete' : ''} onClick={() => void archive(user.id)}>{confirmId === user.id ? 'تأكيد' : 'إيقاف'}</button></div>}<UserAccountActions user={user} roles={roles} sites={sites} currentUserId={currentUserId} onApproveUser={onApproveUser} onDeleteUser={onDeleteUser} /></td></tr>)}</tbody></table></div></section> : <section className="panel role-list"><PanelHeading title="الأدوار والصلاحيات" subtitle="صلاحيات واضحة قابلة للتعديل وتُخزن على الخادم" />{roles.map((role) => <div key={role.id}><span className="role-icon"><ShieldCheck /></span><div className="grow"><strong>{role.name}</strong><small>{role.code}</small><div className="permission-chips">{role.permissions.includes('*') ? <span>كل صلاحيات النظام</span> : role.permissions.slice(0, 4).map((permission) => <span key={permission}>{permissionLabel(permission)}</span>)}{role.permissions.length > 4 && <span>+{role.permissions.length - 4}</span>}</div></div><span className={`pill ${role.active !== false ? 'success' : 'neutral'}`}>{role.active !== false ? 'نشط' : 'مؤرشف'}</span><div className="row-actions"><button onClick={() => editRole(role)}>تعديل</button><button disabled={role.active === false} className={confirmId === role.id ? 'confirm-delete' : ''} onClick={() => void archive(role.id)}>{confirmId === role.id ? 'تأكيد' : 'أرشفة'}</button></div></div>)}</section>}
   </div>;
 }
 

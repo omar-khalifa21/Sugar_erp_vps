@@ -22,6 +22,17 @@ describe('SyncService routing', () => {
     authenticate.mockReset();
   });
 
+  it.each(['catalog.item_published', 'quantity_conflict.decided', 'stock.projection_published', 'device.bootstrap'])('rejects a forged server-only %s event before storing it', async (eventType) => {
+    const create = jest.fn();
+    const transaction = { $queryRaw: jest.fn(), deviceSyncState: { findUnique: jest.fn().mockResolvedValue({ nextExpectedSequence: 1 }) }, syncEvent: { create } };
+    const sync = new SyncService({ $transaction: (run: (tx: typeof transaction) => unknown) => run(transaction) } as never,
+      { authenticate: jest.fn().mockResolvedValue({ id: deviceId, siteId, streamEpoch: 1, profile: 'BRANCH_TYPE_1' }) } as never,
+      { getOrThrow: () => 'test-only-cursor-signing-key' } as never, {} as never);
+    await expect(sync.push(deviceId, 'test-secret', { contract_version: '1.0', stream_epoch: 1, events: [{ event_type: eventType } as never] }))
+      .rejects.toMatchObject({ status: 403 });
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it('routes branch request submissions to a kitchen pull without exposing other event types', async () => {
     authenticate.mockResolvedValue({ id: deviceId, siteId, profile: DeviceProfile.KITCHEN });
     await service.pull(deviceId, 'test-secret', undefined, 100);

@@ -1,9 +1,11 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { ReportsService } from './reports.service';
 
 const device = { id: '10000000-0000-4000-8000-000000000001', siteId: '20000000-0000-4000-8000-000000000002' };
 const shiftId = '30000000-0000-4000-8000-000000000003';
-const content = Buffer.from([0x50, 0x4b, 0x03, 0x04, 1, 2, 3, 4]);
+const content = readFileSync(join(__dirname, '../../test/fixtures/minimal-report.xlsx'));
 const contentHash = createHash('sha256').update(content).digest('hex');
 const input = {
   shiftId,

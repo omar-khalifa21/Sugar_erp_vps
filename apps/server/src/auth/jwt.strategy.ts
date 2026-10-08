@@ -6,6 +6,7 @@ import { PrismaService } from '../prisma/prisma.service';
 
 interface JwtPayload {
   sub: string;
+  ver?: number;
 }
 
 @Injectable()
@@ -14,6 +15,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
       ignoreExpiration: false,
+      algorithms: ['HS256'],
       secretOrKey: config.getOrThrow<string>('JWT_SECRET'),
     });
   }
@@ -24,7 +26,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       where: { id: payload.sub },
       include: { siteRoles: { where: { role: { active: true } }, include: { role: true } } },
     });
-    if (!user?.active || user.status === 'DISABLED') throw new UnauthorizedException();
-    return { id: user.id, roles: user.status === 'ACTIVE' ? user.siteRoles.map((assignment) => assignment.role.code) : [] };
+    if (!user?.active || user.status !== 'ACTIVE' || (payload.ver ?? 0) !== user.tokenVersion) throw new UnauthorizedException();
+    return { id: user.id, roles: user.siteRoles.map((assignment) => assignment.role.code) };
   }
 }

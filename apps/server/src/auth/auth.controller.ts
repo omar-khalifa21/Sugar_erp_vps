@@ -1,8 +1,9 @@
-import { Body, Controller, Post, Get, Req, Headers } from '@nestjs/common';
+import { Body, Controller, Post, Get, Req, Headers, UseGuards } from '@nestjs/common';
 import { Public } from '../common/public.decorator';
 import { AuthService } from './auth.service';
 import { LoginDto } from './login.dto';
 import { SignupDto } from './signup.dto';
+import { AuthRateLimitGuard } from './auth-rate-limit.guard';
 
 @Controller('auth')
 export class AuthController {
@@ -21,12 +22,14 @@ export class AuthController {
 
   @Public()
   @Post('signup')
+  @UseGuards(AuthRateLimitGuard)
   signup(@Body() input: SignupDto): Promise<{ status: 'PENDING_PERMISSION' }> {
     return this.authService.signup(input);
   }
 
   @Public()
   @Post('login')
+  @UseGuards(AuthRateLimitGuard)
   login(@Body() input: LoginDto): Promise<{ access_token: string; token_type: 'Bearer'; status: string }> {
     return this.authService.login(input);
   }

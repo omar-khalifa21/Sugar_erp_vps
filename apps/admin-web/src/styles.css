@@ -1,3 +1,7 @@
+.account-confirmation { display: grid; gap: 12px; min-width: 260px; max-width: 390px; padding: 16px; margin-top: 12px; border: 1px solid #e5e8f0; border-radius: 12px; background: #fff; white-space: normal; }
+.account-confirmation label { display: grid; gap: 8px; }
+.account-confirmation p { margin: 0; font-size: 13px; line-height: 1.7; }
+.user-management-table td:nth-child(2) { max-width: 180px; overflow-wrap: anywhere; white-space: normal; }
 :root {
   font-family: Tahoma, "Segoe UI", Arial, sans-serif;
   color: #18213d;

@@ -28,6 +28,7 @@ async function main(): Promise<void> {
       displayName: 'System Administrator',
       passwordHash,
       active: true,
+      status: 'ACTIVE',
     },
     create: {
       username,

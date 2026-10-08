@@ -71,6 +71,9 @@ export class SyncService {
         const acceptedInBatch = new Set<string>();
 
         for (const event of input.events) {
+          if (['catalog.item_published', 'quantity_conflict.decided', 'stock.projection_published', 'device.bootstrap'].includes(event.event_type)) {
+            throw contractError(403, 'FORBIDDEN', 'This event can only be published by the server', false);
+          }
           const computedHash = computeEventHash(event);
           if (computedHash !== event.content_hash) {
             throw contractError(422, 'CONTENT_HASH_MISMATCH', 'Event content hash does not match its canonical content', false);
@@ -139,7 +142,7 @@ export class SyncService {
               occurredAt: new Date(event.occurred_at),
               occurredAtRaw: event.occurred_at,
               payload: event.payload as Prisma.InputJsonValue,
-              dependencies: (event.dependencies ?? []) as Prisma.InputJsonValue,
+              dependencies: event.dependencies ?? [],
               contentHash: event.content_hash,
             },
           });

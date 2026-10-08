@@ -311,6 +311,7 @@ async function downloadReport(path: string, token: string, filename: string) {
 }
 
 export const api = {
+  session: (token: string) => request<{ id: string }>('/auth/me', {}, token),
   login: (username: string, password: string) =>
     request<{ access_token: string; token_type: 'Bearer'; status: string }>('/auth/login', {
       method: 'POST',
@@ -361,6 +362,10 @@ export const api = {
   updateUser: (token: string, id: string, input: { username?: string; displayName?: string; password?: string; active?: boolean; roleId?: string; siteId?: string }) =>
     request<User>(`/users/${id}`, { method: 'PATCH', body: JSON.stringify(input) }, token),
   archiveUser: (token: string, id: string) => request<User>(`/users/${id}`, { method: 'DELETE' }, token),
+  approveUser: (token: string, id: string, input: { roleId: string; siteId?: string }) =>
+    request<User>(`/users/${id}/approve`, { method: 'POST', body: JSON.stringify(input) }, token),
+  deleteUser: (token: string, id: string, confirmation: string, reject: boolean) =>
+    request<{ id: string; deleted: boolean }>(`/users/${id}/${reject ? 'reject' : 'permanent'}`, { method: reject ? 'POST' : 'DELETE', body: JSON.stringify({ confirmation }) }, token),
   createRole: (token: string, input: { code: string; name: string; permissions: string[] }) =>
     request<Role>('/roles', { method: 'POST', body: JSON.stringify(input) }, token),
   updateRole: (token: string, id: string, input: { code?: string; name?: string; permissions?: string[]; active?: boolean }) =>
@@ -400,6 +405,12 @@ export const api = {
 export function friendlyError(error: unknown): string {
   if (!(error instanceof ApiError)) return 'تعذر الاتصال بالخادم. حاول مرة أخرى بعد قليل.';
   const messages: Record<string, string> = {
+    ACCOUNT_PENDING: 'حسابك بانتظار موافقة المسؤول. لا يمكنك تسجيل الدخول قبل الموافقة.',
+    RATE_LIMITED: 'محاولات كثيرة. انتظر قليلاً ثم حاول مرة أخرى.',
+    SELF_DELETE: 'لا يمكنك حذف حسابك نهائياً.',
+    LAST_ADMIN: 'لا يمكن حذف أو إيقاف آخر مسؤول نشط.',
+    ADMIN_ROLE_REQUIRED: 'لا يمكن إيقاف أو تغيير رمز دور المسؤول الأساسي.',
+    CONFIRMATION_MISMATCH: 'اكتب اسم المستخدم تماماً كما يظهر لتأكيد الحذف.',
     UNAUTHENTICATED: 'انتهت الجلسة. سجّل الدخول مرة أخرى.',
     FORBIDDEN: 'ليس لديك صلاحية لتنفيذ هذا الإجراء.',
     VALIDATION_ERROR: 'راجع البيانات المدخلة ثم حاول مرة أخرى.',

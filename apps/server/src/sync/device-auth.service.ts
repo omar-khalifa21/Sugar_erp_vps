@@ -9,12 +9,14 @@ export class DeviceAuthService {
   constructor(private readonly prisma: PrismaService) {}
 
   async authenticate(deviceId?: string, credential?: string, appVersion?: string) {
-    if (!deviceId || !credential) throw new UnauthorizedException('Device credentials are required');
-    const device = await this.prisma.device.findUnique({ where: { id: deviceId } });
+    if (!deviceId || !credential || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(deviceId)) throw new UnauthorizedException('Device credentials are required');
+    const device = await this.prisma.device.findUnique({ where: { id: deviceId }, include: { site: { select: { active: true } } } });
     const actual = Buffer.from(device?.credentialHash || '', 'utf8');
     const expected = Buffer.from(hashSecret(credential), 'utf8');
     if (
       !device ||
+      !device.activeWriter ||
+      !device.site.active ||
       device.enrollmentStatus !== EnrollmentStatus.ENROLLED ||
       !device.credentialHash ||
       actual.length !== expected.length ||

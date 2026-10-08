@@ -43,6 +43,7 @@ services:
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL with host postgres in the server-only .env}
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in the server-only environment}
       JWT_EXPIRES_IN: 15m
+      TRUST_PROXY_HOPS: '1'
       PORT: 3000
       RELEASES_DIR: /var/lib/sugar-erp/releases
     volumes:

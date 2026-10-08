@@ -1,8 +1,9 @@
 import { HttpException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma, ShiftKind } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { createHash } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { ReportUploadDto } from './report-upload.dto';
+import { isXlsx } from './xlsx-validation';
 
 @Injectable()
 export class ReportsService {
@@ -65,7 +66,7 @@ export class ReportsService {
           deviceId: device.id,
           reportVersion: input.reportVersion,
           businessDate: new Date(`${input.businessDate}T00:00:00.000Z`),
-          shiftKind: input.shiftKind as ShiftKind,
+          shiftKind: input.shiftKind,
           filename: input.filename,
           contentHash: input.contentHash,
           byteLength: BigInt(input.byteLength),
@@ -101,10 +102,6 @@ export class ReportsService {
     if (!report) throw new NotFoundException('Shift report not found');
     return report;
   }
-}
-
-function isXlsx(content: Buffer): boolean {
-  return content.length >= 4 && content[0] === 0x50 && content[1] === 0x4b && content[2] === 0x03 && content[3] === 0x04;
 }
 
 function sanitizeFileNamePart(value: string): string {

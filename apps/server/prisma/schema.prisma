@@ -135,14 +135,36 @@ model User {
   passwordHash String         @map("password_hash") @db.VarChar(255)
   active       Boolean        @default(true)
   status       String         @default("ACTIVE") @db.VarChar(30)
+  tokenVersion Int            @default(0) @map("token_version")
   createdAt    DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt    DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
   siteRoles    UserSiteRole[]
+
+  @@map("users")
+}
+
+// Historical attribution only: no password, roles, or ability to authenticate.
+model UserIdentity {
+  id String @id @db.Uuid
+  displayName String @map("display_name") @db.VarChar(200)
   stockAdjustments StockAdjustment[]
   adminDecisions AdminDecision[]
   inventoryTransactions InventoryTransaction[]
 
-  @@map("users")
+  @@map("user_identities")
+}
+
+model UserAuditEvent {
+  id String @id @default(uuid()) @db.Uuid
+  actorId String @map("actor_id") @db.Uuid
+  actorUsername String @map("actor_username") @db.VarChar(100)
+  targetId String @map("target_id") @db.Uuid
+  targetUsername String @map("target_username") @db.VarChar(100)
+  action String @db.VarChar(40)
+  occurredAt DateTime @default(now()) @map("occurred_at") @db.Timestamptz(6)
+
+  @@index([targetId, occurredAt])
+  @@map("user_audit_events")
 }
 
 model Role {
@@ -494,7 +516,7 @@ model InventoryTransaction {
   occurredAt DateTime @map("occurred_at") @db.Timestamptz(6)
   sourceEventId String @unique @map("source_event_id") @db.Uuid
   site Site @relation(fields: [siteId], references: [id], onDelete: Restrict)
-  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+  user UserIdentity @relation(fields: [userId], references: [id], onDelete: Restrict)
   lines InventoryTransactionLine[]
   @@unique([siteId, kind, referenceId])
   @@index([siteId, occurredAt])
@@ -563,7 +585,7 @@ model StockAdjustment {
   appliedAt       DateTime?        @map("applied_at") @db.Timestamptz(6)
   site            Site             @relation(fields: [siteId], references: [id], onDelete: Restrict)
   item            Item             @relation(fields: [itemId], references: [id], onDelete: Restrict)
-  createdBy       User             @relation(fields: [createdByUserId], references: [id], onDelete: Restrict)
+  createdBy       UserIdentity     @relation(fields: [createdByUserId], references: [id], onDelete: Restrict)
 
   @@index([siteId, status, createdAt])
   @@map("stock_adjustments")
@@ -744,7 +766,7 @@ model AdminDecision {
   decidedAt         DateTime                  @default(now()) @map("decided_at") @db.Timestamptz(6)
   appliedAt         DateTime?                 @map("applied_at") @db.Timestamptz(6)
   conflict          QuantityConflict          @relation(fields: [conflictId], references: [id], onDelete: Restrict)
-  adminUser         User                      @relation(fields: [adminUserId], references: [id], onDelete: Restrict)
+  adminUser         UserIdentity              @relation(fields: [adminUserId], references: [id], onDelete: Restrict)
 
   @@map("admin_decisions")
 }

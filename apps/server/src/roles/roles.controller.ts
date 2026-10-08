@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Req } from '@nestjs/common';
 import { Role } from '@prisma/client';
 import { CreateRoleDto } from './create-role.dto';
 import { RolesService } from './roles.service';
@@ -21,12 +21,12 @@ export class RolesController {
   }
 
   @Patch(':id')
-  update(@Param('id', ParseUUIDPipe) id: string, @Body() input: UpdateRoleDto): Promise<Role> {
-    return this.roles.update(id, input);
+  update(@Param('id', ParseUUIDPipe) id: string, @Body() input: UpdateRoleDto, @Req() request: { user: { id: string } }): Promise<Role> {
+    return this.roles.update(id, input, request.user.id);
   }
 
   @Delete(':id')
-  archive(@Param('id', ParseUUIDPipe) id: string): Promise<Role> {
-    return this.roles.archive(id);
+  archive(@Param('id', ParseUUIDPipe) id: string, @Req() request: { user: { id: string } }): Promise<Role> {
+    return this.roles.archive(id, request.user.id);
   }
 }
