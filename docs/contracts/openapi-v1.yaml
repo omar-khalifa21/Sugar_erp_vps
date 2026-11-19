@@ -45,6 +45,52 @@ paths:
       responses:
         '201': { description: Enrolled device and credential returned once }
         '409': { $ref: '#/components/responses/Error' }
+  /admin/kitchen-enrollment:
+    get:
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Admin only. Returns setting as null or an object containing siteId and updatedAt. }
+        '403': { $ref: '#/components/responses/Error' }
+    put:
+      security: [{ bearerAuth: [] }]
+      description: Admin only. Sets or rotates the password and selects an active Kitchen site over HTTPS.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [siteId, password]
+              properties:
+                siteId: { type: string, format: uuid }
+                password: { type: string, format: password, writeOnly: true, minLength: 12, maxLength: 128 }
+      responses:
+        '200': { description: Returns siteId and updatedAt }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /enrollment/kitchen:
+    post:
+      security: []
+      description: Rate-limited Kitchen password enrollment over HTTPS.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [password, deviceName, keyThumbprint, appVersion]
+              properties:
+                password: { type: string, format: password, writeOnly: true, maxLength: 128 }
+                deviceName: { type: string, minLength: 2, maxLength: 120 }
+                keyThumbprint: { type: string, pattern: '^[a-fA-F0-9]{64}$' }
+                appVersion: { type: string, maxLength: 50 }
+      responses:
+        '201': { description: Standard enrollment response with a Kitchen device and its credential returned once }
+        '401': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
   /sync/push:
     post:
       security: [{ deviceId: [], deviceSecret: [] }]

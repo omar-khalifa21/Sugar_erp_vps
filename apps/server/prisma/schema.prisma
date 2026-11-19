@@ -82,6 +82,7 @@ model Site {
   devices   Device[]
   userRoles UserSiteRole[]
   enrollmentTokens EnrollmentToken[]
+  kitchenEnrollment KitchenEnrollmentSetting?
   syncEvents SyncEvent[]
   stockBalances StockBalance[]
   retailSales RetailSale[]
@@ -102,6 +103,17 @@ model Site {
   retailPriceRevisions SiteRetailPriceRevision[]
 
   @@map("sites")
+}
+
+model KitchenEnrollmentSetting {
+  id           Int      @id @default(1)
+  siteId       String   @unique @map("site_id") @db.Uuid
+  passwordHash String   @map("password_hash") @db.VarChar(255)
+  updatedBy    String   @map("updated_by") @db.Uuid
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  site         Site     @relation(fields: [siteId], references: [id], onDelete: Restrict)
+
+  @@map("kitchen_enrollment_settings")
 }
 
 model Device {

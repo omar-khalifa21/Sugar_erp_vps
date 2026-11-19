@@ -15,6 +15,8 @@ Date: 2026-09-09
 
 An administrator creates an active site and issues a single-use enrollment token valid for 5–1440 minutes. Enrollment validates the site profile, refuses a second active writer, stores only hashes of the token and device credential, and returns the credential once. Revocation clears the credential, disables the writer, and increments its epoch.
 
+Kitchen also supports password enrollment over HTTPS. An Admin sets or rotates the deployment's Kitchen enrollment password and selects the destination active Kitchen site. The server stores an Argon2id hash. Successful enrollment returns the standard device identity and credential once. Rotation takes effect for subsequent enrollments. Device revocation and the single-writer check apply to both enrollment methods. See ADR-0006.
+
 Admin JWTs govern central administration. Device sync uses `X-Device-Id` and `X-Device-Secret` over HTTPS. No desktop receives PostgreSQL credentials. Profile and site authorization is derived from enrollment, never trusted from event payloads.
 
 Permissions in v1:

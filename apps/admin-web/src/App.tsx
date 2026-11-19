@@ -76,7 +76,7 @@ const navItems: NavItem[] = [
   { key: 'conflicts', label: 'التعارضات والقرارات', icon: ClipboardCheck },
   { key: 'catalog', label: 'الأصناف والتسعير', icon: Boxes },
   { key: 'team', label: 'المستخدمون والصلاحيات', icon: UsersRound },
-  { key: 'operations', label: 'التشغيل والنسخ', icon: Cloud },
+  { key: 'operations', label: 'الأجهزة والنسخ', icon: Cloud },
 ];
 
 const pageTitles: Record<PageKey, { title: string; subtitle: string }> = {
@@ -87,7 +87,7 @@ const pageTitles: Record<PageKey, { title: string; subtitle: string }> = {
   conflicts: { title: 'التعارضات والقرارات', subtitle: 'المراجعة ثم متابعة التطبيق على جهاز الموقع' },
   catalog: { title: 'الأصناف والتسعير', subtitle: 'كتالوج مركزي بإصدارات واضحة' },
   team: { title: 'المستخدمون والصلاحيات', subtitle: 'حسابات مسمّاة وصلاحيات حسب الموقع' },
-  operations: { title: 'التشغيل والنسخ الاحتياطي', subtitle: 'الأجهزة والتقارير والإصدارات وحماية البيانات' },
+  operations: { title: 'الأجهزة والنسخ الاحتياطي', subtitle: 'الأجهزة والتقارير والإصدارات وحماية البيانات' },
 };
 
 const siteTypeLabels: Record<SiteType, string> = {
@@ -937,6 +937,55 @@ function TeamPage({ users, roles, sites, onCreateUser, onUpdateUser, onArchiveUs
   </div>;
 }
 
+function KitchenEnrollmentPanel({ token, sites }: { token: string; sites: Site[] }) {
+  const kitchens = sites.filter(site => site.type === 'KITCHEN' && site.active);
+  const [chosenSite, setChosenSite] = useState('');
+  const [setting, setSetting] = useState<{ siteId: string; updatedAt: string } | null>();
+  const [password, setPassword] = useState('');
+  const [confirmation, setConfirmation] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+  useEffect(() => {
+    let current = true;
+    void api.kitchenEnrollment(token).then(({ setting }) => {
+      if (current) setSetting(setting);
+    }).catch(error => { if (current) setMessage(friendlyError(error)); });
+    return () => { current = false; };
+  }, [token]);
+  const siteId = chosenSite || setting?.siteId || (kitchens.length === 1 ? kitchens[0].id : '');
+  const save = async (event: FormEvent) => {
+    event.preventDefault();
+    if (busy) return;
+    if (password !== confirmation) { setMessage('كلمتا المرور غير متطابقتين.'); return; }
+    setBusy(true);
+    setMessage('');
+    try {
+      setSetting(await api.setKitchenEnrollment(token, siteId, password));
+      setPassword(''); setConfirmation('');
+      setMessage('تم حفظ كلمة مرور ربط المطبخ.');
+    } catch (error) { setMessage(friendlyError(error)); }
+    finally { setBusy(false); }
+  };
+  return <section className="panel">
+    <PanelHeading title="كلمة مرور ربط الأجهزة" subtitle="اختر المطبخ وحدد كلمة مرور للأجهزة الجديدة. تظل الأجهزة المرتبطة صالحة حتى تعطيلها." />
+    {setting === null && <p>لم يتم تعيين كلمة مرور</p>}
+    {setting && <p>موقع الربط الحالي: {sites.find(site => site.id === setting.siteId)?.name} · آخر تغيير: {formatDate(setting.updatedAt)}</p>}
+    <form onSubmit={save} className="form-grid">
+      <label>المطبخ<select value={siteId} required onChange={event => setChosenSite(event.target.value)}>
+        <option value="">اختر المطبخ</option>{kitchens.map(site => <option key={site.id} value={site.id}>{site.name}</option>)}
+      </select></label>
+      <label>كلمة مرور الربط الجديدة (١٢ حرفاً على الأقل)<input type="password" autoComplete="new-password" required
+        minLength={12} maxLength={128} value={password} onChange={event => setPassword(event.target.value)} /></label>
+      <label>تأكيد كلمة المرور الجديدة<input type="password" autoComplete="new-password" required minLength={12} maxLength={128}
+        value={confirmation} onChange={event => setConfirmation(event.target.value)} /></label>
+      <button className="primary-button" disabled={busy || setting === undefined || !kitchens.some(site => site.id === siteId)}>
+        {busy ? 'جاري الحفظ…' : 'حفظ كلمة مرور الربط'}
+      </button>
+    </form>
+    {message && <p role="status">{message}</p>}
+  </section>;
+}
+
 function OperationsPage({ data, onIssueEnrollmentToken, onDisableDevice, token }: { data: AdminData; token: string; onIssueEnrollmentToken: (siteId: string) => Promise<{ id: string; token: string; siteId: string; profile: SiteType; expiresAt: string }>; onDisableDevice: (id: string) => Promise<Device> }) {
   const [enrollment, setEnrollment] = useState<{ token: string; siteId: string; expiresAt: string } | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
@@ -964,7 +1013,8 @@ function OperationsPage({ data, onIssueEnrollmentToken, onDisableDevice, token }
     KITCHEN: kitchenRelease?.version,
   };
   return <div className="page-stack">
-    <section className="panel enrollment-panel"><PanelHeading title="إعداد أجهزة الفروع" subtitle="عنوان الخادم والمواقع محفوظان هنا؛ أنشئ رمز ربط جديداً عند إعداد كل جهاز" /><div className="detail-list"><div><dt>عنوان الخادم في التطبيق</dt><dd className="ltr">https://ascendyz.xyz/api/v1</dd></div><div><dt>طريقة الربط</dt><dd>الإعدادات ← ربط الجهاز بالخادم ← الصق العنوان والرمز</dd></div></div><div className="enrollment-sites">{data.sites.filter((site) => site.active).map((site) => <button key={site.id} disabled={busySite === site.id} onClick={async () => { setBusySite(site.id); setMessage(''); try { const result = await onIssueEnrollmentToken(site.id); setEnrollment(result); } catch (caught) { setMessage(friendlyError(caught)); } finally { setBusySite(null); } }}><span className="site-icon"><MonitorSmartphone /></span><span><strong>{site.name}</strong><small>{site.code} · {siteTypeLabels[site.type]}</small></span><span>إنشاء رمز ربط</span></button>)}</div>{message && <div className="form-error">{message}</div>}{enrollment && <div className="one-time-token"><div><strong>رمز ربط لمرة واحدة</strong><small>ينتهي {formatDate(enrollment.expiresAt)}. انسخه الآن؛ يمكنك إصدار رمز جديد لاحقاً.</small></div><code>{enrollment.token}</code><button className="secondary-button" onClick={() => { void navigator.clipboard.writeText(enrollment.token); }}>نسخ الرمز</button></div>}</section>
+    <KitchenEnrollmentPanel token={token} sites={data.sites} />
+    <section className="panel enrollment-panel"><PanelHeading title="إعداد أجهزة الفروع" subtitle="عنوان الخادم والمواقع محفوظان هنا؛ أنشئ رمز ربط جديداً عند إعداد كل جهاز" /><div className="detail-list"><div><dt>عنوان الخادم في التطبيق</dt><dd className="ltr">https://ascendyz.xyz/api/v1</dd></div><div><dt>طريقة الربط</dt><dd>الإعدادات ← ربط الجهاز بالخادم ← الصق العنوان والرمز</dd></div></div><div className="enrollment-sites">{data.sites.filter((site) => site.active && site.type !== 'KITCHEN').map((site) => <button key={site.id} disabled={busySite === site.id} onClick={async () => { setBusySite(site.id); setMessage(''); try { const result = await onIssueEnrollmentToken(site.id); setEnrollment(result); } catch (caught) { setMessage(friendlyError(caught)); } finally { setBusySite(null); } }}><span className="site-icon"><MonitorSmartphone /></span><span><strong>{site.name}</strong><small>{site.code} · {siteTypeLabels[site.type]}</small></span><span>إنشاء رمز ربط</span></button>)}</div>{message && <div className="form-error">{message}</div>}{enrollment && <div className="one-time-token"><div><strong>رمز ربط لمرة واحدة</strong><small>ينتهي {formatDate(enrollment.expiresAt)}. انسخه الآن؛ يمكنك إصدار رمز جديد لاحقاً.</small></div><code>{enrollment.token}</code><button className="secondary-button" onClick={() => { void navigator.clipboard.writeText(enrollment.token); }}>نسخ الرمز</button></div>}</section>
     <section className="panel table-panel"><PanelHeading title="الأجهزة والمزامنة" subtitle="الأجهزة النشطة فقط؛ التعطيل يلغي بيانات الاعتماد ويخفي الجهاز مع الاحتفاظ بسجله في الخادم" /><div className="table-wrap"><table><thead><tr><th>الجهاز</th><th>الموقع</th><th>الملف</th><th>التسجيل</th><th>آخر ظهور</th><th>الإصدار</th><th>إجراء</th></tr></thead><tbody>{data.devices.filter((device) => device.enrollmentStatus !== 'REVOKED' && device.name !== '__SERVER_SYNC__').map((device) => <tr key={device.id}><td><strong>{device.name || 'جهاز بدون اسم'}</strong><small className="cell-note ltr" title={device.id}>{device.id}</small></td><td>{data.sites.find((site) => site.id === device.siteId)?.name || 'موقع غير معروف'}</td><td>{siteTypeLabels[device.profile]}</td><td><span className={`pill ${device.enrollmentStatus === 'ENROLLED' ? 'success' : 'warning'}`}>{device.enrollmentStatus === 'ENROLLED' ? 'مسجل ونشط' : 'بانتظار التسجيل'}</span></td><td>{device.lastSeenAt ? formatDate(device.lastSeenAt) : 'لم يتصل بعد'}</td><td><span className="ltr">المثبت: {device.appVersion || '—'}</span>{latestVersions[device.profile] && <small className="cell-note">المتاح: {latestVersions[device.profile]}</small>}</td><td><div className="row-actions"><button className={confirmDisableId === device.id ? 'confirm-delete' : ''} disabled={disablingId !== null} onClick={async () => { if (confirmDisableId !== device.id) { setConfirmDisableId(device.id); return; } setDisablingId(device.id); setMessage(''); try { await onDisableDevice(device.id); setConfirmDisableId(null); } catch (caught) { setMessage(friendlyError(caught)); } finally { setDisablingId(null); } }}>{disablingId === device.id ? 'جارٍ التعطيل…' : confirmDisableId === device.id ? 'تأكيد تعطيل الجهاز' : 'تعطيل الجهاز'}</button>{confirmDisableId === device.id && disablingId === null && <button className="secondary-button" onClick={() => setConfirmDisableId(null)}>إلغاء</button>}</div></td></tr>)}</tbody></table></div>{!data.devices.some((device) => device.enrollmentStatus !== 'REVOKED' && device.name !== '__SERVER_SYNC__') && <EmptyState icon={MonitorSmartphone} title="لا توجد أجهزة نشطة" text="أنشئ رمز تسجيل لربط جهاز جديد." />}</section>
     <section className="two-column">
       <article className="panel backup-panel"><PanelHeading title="النسخ الاحتياطي" subtitle="PostgreSQL وسجل الملفات التشغيلية" /><div className="backup-visual"><DatabaseBackup size={34} /><div><strong>لم تُسجل نسخة خارجية بعد</strong><p>يلزم تحديد وجهة VPS مشفّرة وسياسة الاحتفاظ قبل التفعيل.</p></div></div><dl className="detail-list"><div><dt>قاعدة البيانات</dt><dd><span className="status-good">جاهزة</span></dd></div><div><dt>الهدف المقترح</dt><dd>RPO ساعة / RTO ٤ ساعات</dd></div><div><dt>اختبار الاستعادة</dt><dd>بانتظار إعداد الوجهة</dd></div></dl><button className="secondary-button" disabled>تشغيل نسخة الآن</button></article>

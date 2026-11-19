@@ -9,12 +9,13 @@ export class AuthRateLimitGuard implements CanActivate {
     const request = context.switchToHttp().getRequest<Request>();
     const response = context.switchToHttp().getResponse<Response>();
     const signup = /\/signup\/?$/i.test(request.path);
-    const windowMs = signup ? 600_000 : 60_000;
-    const limit = signup ? 5 : 20;
+    const kitchen = /\/enrollment\/kitchen\/?$/i.test(request.path);
+    const windowMs = signup || kitchen ? 600_000 : 60_000;
+    const limit = signup || kitchen ? 5 : 20;
     const now = Date.now();
     // request.ip trusts only the explicitly configured reverse proxy. Never read
     // arbitrary X-Forwarded-For directly. Bound storage even under address churn.
-    const key = `${signup ? 'signup' : 'login'}:${request.ip ?? request.socket.remoteAddress}`;
+    const key = `${kitchen ? 'kitchen-enrollment' : signup ? 'signup' : 'login'}:${request.ip ?? request.socket.remoteAddress}`;
     for (const [storedKey, value] of this.attempts) {
       if (value.expires <= now) this.attempts.delete(storedKey);
     }

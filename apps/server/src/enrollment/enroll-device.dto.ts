@@ -1,14 +1,7 @@
 import { IsEnum, IsOptional, IsString, Length, Matches, MaxLength } from 'class-validator';
 import { DeviceProfile } from '@prisma/client';
 
-export class EnrollDeviceDto {
-  @IsOptional()
-  @IsEnum(DeviceProfile)
-  expectedProfile?: DeviceProfile;
-  @IsString()
-  @Length(32, 200)
-  token!: string;
-
+export class EnrollmentDeviceInfo {
   @IsString()
   @Length(2, 120)
   deviceName!: string;
@@ -20,4 +13,13 @@ export class EnrollDeviceDto {
   @IsString()
   @MaxLength(50)
   appVersion!: string;
+}
+
+export class EnrollDeviceDto extends EnrollmentDeviceInfo {
+  @IsOptional()
+  @IsEnum(DeviceProfile)
+  expectedProfile?: DeviceProfile;
+  @IsString()
+  @Length(32, 200)
+  token!: string;
 }

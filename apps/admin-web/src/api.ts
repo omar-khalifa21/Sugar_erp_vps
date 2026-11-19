@@ -371,6 +371,12 @@ export const api = {
   updateRole: (token: string, id: string, input: { code?: string; name?: string; permissions?: string[]; active?: boolean }) =>
     request<Role>(`/roles/${id}`, { method: 'PATCH', body: JSON.stringify(input) }, token),
   archiveRole: (token: string, id: string) => request<Role>(`/roles/${id}`, { method: 'DELETE' }, token),
+  kitchenEnrollment: (token: string) =>
+    request<{ setting: { siteId: string; updatedAt: string } | null }>('/admin/kitchen-enrollment', {}, token),
+  setKitchenEnrollment: (token: string, siteId: string, password: string) =>
+    request<{ siteId: string; updatedAt: string }>('/admin/kitchen-enrollment', {
+      method: 'PUT', body: JSON.stringify({ siteId, password }),
+    }, token),
   issueEnrollmentToken: (token: string, siteId: string) =>
     request<{ id: string; token: string; siteId: string; profile: SiteType; expiresAt: string }>(
       `/sites/${siteId}/enrollment-tokens`,
