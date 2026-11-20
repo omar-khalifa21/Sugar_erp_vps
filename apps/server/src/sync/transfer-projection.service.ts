@@ -94,7 +94,7 @@ export class TransferProjectionService {
     const payload = object(event.payload);
     if (id(payload.document_id) !== event.id || id(payload.site_id) !== siteId) error('WRONG_SITE', 'Manual incoming belongs to another site', 403);
     id(payload.shift_id);
-    const reason = text(payload.reason, 500);
+    text(payload.reason, 500);
     if (payload.source !== undefined && payload.source !== 'MANUAL_BRANCH_ENTRY') error('INVALID_INVENTORY', 'Manual incoming source is invalid');
     const deductKitchenIngredients = payload.deduct_kitchen_ingredients === true;
     if (payload.deduct_kitchen_ingredients !== undefined && typeof payload.deduct_kitchen_ingredients !== 'boolean')
@@ -111,35 +111,12 @@ export class TransferProjectionService {
     if (deductKitchenIngredients) {
       const kitchens = await tx.site.findMany({ where: { type: 'KITCHEN', active: true }, orderBy: { id: 'asc' }, take: 2 });
       if (kitchens.length !== 1) error('KITCHEN_ROUTE_UNAVAILABLE', 'يجب أن يوجد مطبخ نشط واحد فقط لخصم الخامات.', 409);
-      const kitchen = kitchens[0];
-      const recipes = await tx.recipe.findMany({ where: { productItemId: { in: itemIds }, active: true },
-        include: { product: { select: { nameAr: true } }, components: true } });
-      const missing = itemIds.filter((itemId) => !recipes.some((recipe) => recipe.productItemId === itemId));
-      if (missing.length) {
-        const products = await tx.item.findMany({ where: { id: { in: missing } }, select: { nameAr: true } });
-        error('RECIPE_REQUIRED', `لا توجد وصفة فعالة للأصناف: ${products.map((item) => item.nameAr).join('، ')}`, 409);
-      }
-      const required = new Map<string, bigint>();
-      for (const row of rows) {
-        const productId = id(row.item_id), amount = quantity(row.quantity_scaled);
-        const recipe = recipes.find((value) => value.productItemId === productId)!;
-        for (const component of recipe.components) {
-          const numerator = amount * component.quantityScaled;
-          if (numerator % recipe.outputScaled !== 0n) error('RECIPE_ROUNDING', `كمية ${recipe.product.nameAr} لا تتوافق مع وحدة الوصفة.`, 409);
-          required.set(component.ingredientItemId, (required.get(component.ingredientItemId) ?? 0n) + numerator / recipe.outputScaled);
-        }
-      }
-      for (const [ingredientItemId, used] of [...required.entries()].sort(([left], [right]) => left.localeCompare(right))) {
-        const key = { siteId: kitchen.id, itemId: ingredientItemId, location: StockLocation.KITCHEN };
-        const balance = await tx.stockBalance.findUnique({ where: { siteId_itemId_location: key }, include: { item: { select: { nameAr: true } } } });
-        if (!balance || balance.quantityScaled < used) error('INSUFFICIENT_INGREDIENTS', `رصيد خامة ${balance?.item.nameAr ?? ingredientItemId} غير كافٍ.`, 409);
-        const cost = inventoryCostForUse(balance.inventoryCostMinor, balance.quantityScaled, used);
-        await tx.stockBalance.update({ where: { siteId_itemId_location: key }, data: {
-          quantityScaled: { decrement: used }, inventoryCostMinor: { decrement: cost }, version: { increment: 1 },
-          asOfAt: new Date(event.occurred_at), sourceEventId: event.id } });
-        await tx.ingredientStockTransaction.create({ data: { id: randomUUID(), siteId: kitchen.id, itemId: ingredientItemId,
-          sourceEventId: event.id, kind: 'MANUAL_INCOMING_CONSUMPTION', quantityDeltaScaled: -used, costMinor: cost,
-          reason, occurredAt: new Date(event.occurred_at) } });
+      const kitchenId = kitchens[0].id;
+      const blocked = await this.deductManualIngredients(tx, kitchenId, event.id, new Date(event.occurred_at), payload);
+      if (blocked?.code === 'RECIPE_REQUIRED') {
+        await tx.pendingManualDeduction.create({ data: { sourceEventId: event.id, kitchenSiteId: kitchenId } });
+      } else if (blocked) {
+        error(blocked.code, blocked.message, 409);
       }
     }
     for (const row of rows) {
@@ -150,6 +127,44 @@ export class TransferProjectionService {
         update: { quantityScaled: { increment: amount }, version: { increment: 1 }, asOfAt: new Date(event.occurred_at), sourceEventId: event.id } });
     }
   }
+  async deductManualIngredients(tx: Client, kitchenId: string, eventId: string, occurredAt: Date,
+    input: unknown, postedAt = occurredAt) {
+    const payload = object(input);
+    const rows = lines(payload.lines), reason = text(payload.reason, 500);
+    const itemIds = rows.map(row => id(row.item_id));
+    const recipes = await tx.recipe.findMany({ where: { productItemId: { in: itemIds }, active: true },
+      include: { product: { select: { nameAr: true } }, components: true } });
+    if (recipes.length !== itemIds.length || recipes.some(recipe => recipe.components.length === 0))
+      return { code: 'RECIPE_REQUIRED', message: 'توجد وصفة غير مكتملة.' };
+    const required = new Map<string, bigint>();
+    for (const row of rows) {
+      const productId = id(row.item_id), amount = quantity(row.quantity_scaled);
+      const recipe = recipes.find((value) => value.productItemId === productId)!;
+      for (const component of recipe.components) {
+        const numerator = amount * component.quantityScaled;
+        if (numerator % recipe.outputScaled !== 0n) return { code: 'RECIPE_ROUNDING', message: `كمية ${recipe.product.nameAr} لا تتوافق مع وحدة الوصفة.` };
+        required.set(component.ingredientItemId, (required.get(component.ingredientItemId) ?? 0n) + numerator / recipe.outputScaled);
+      }
+    }
+    const deductions = [];
+    for (const [ingredientItemId, used] of [...required.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+      const key = { siteId: kitchenId, itemId: ingredientItemId, location: StockLocation.KITCHEN };
+      const balance = await tx.stockBalance.findUnique({ where: { siteId_itemId_location: key }, include: { item: { select: { nameAr: true } } } });
+      if (!balance || balance.quantityScaled < used) return { code: 'INSUFFICIENT_INGREDIENTS', message: `رصيد خامة ${balance?.item.nameAr ?? ingredientItemId} غير كافٍ.` };
+      const cost = inventoryCostForUse(balance.inventoryCostMinor, balance.quantityScaled, used);
+      deductions.push({ key, ingredientItemId, used, cost });
+    }
+    for (const { key, ingredientItemId, used, cost } of deductions) {
+      await tx.stockBalance.update({ where: { siteId_itemId_location: key }, data: {
+        quantityScaled: { decrement: used }, inventoryCostMinor: { decrement: cost }, version: { increment: 1 },
+        asOfAt: postedAt, sourceEventId: eventId } });
+      await tx.ingredientStockTransaction.create({ data: { id: randomUUID(), siteId: kitchenId, itemId: ingredientItemId,
+        sourceEventId: eventId, kind: 'MANUAL_INCOMING_CONSUMPTION', quantityDeltaScaled: -used, costMinor: cost,
+        reason, occurredAt } });
+    }
+    return null;
+  }
+
   private async catalogItem(tx: Client, event: SyncEventDto, siteId: string, profile: DeviceProfile) {
     const payload = object(event.payload);
     if (id(payload.site_id) !== siteId) error('WRONG_SITE', 'Catalog item belongs to another site', 403);

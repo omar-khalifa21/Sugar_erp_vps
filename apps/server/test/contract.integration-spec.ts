@@ -7,6 +7,7 @@ import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/configure-app';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { computeEventHash } from '../src/sync/sync.service';
+import { PendingManualDeductionsService } from '../src/sync/pending-manual-deductions.service';
 import { hashSecret } from '../src/enrollment/enrollment.service';
 
 describe('Contract v1 sync (PostgreSQL integration)', () => {
@@ -58,6 +59,7 @@ describe('Contract v1 sync (PostgreSQL integration)', () => {
   afterAll(async () => {
     const integrationSiteIds = [siteId, kitchenSiteId].filter((value): value is string => Boolean(value));
     if (integrationSiteIds.length) {
+      await prisma.pendingManualDeduction.deleteMany({ where: { kitchenSiteId: { in: integrationSiteIds } } });
       await prisma.siteRetailPriceRevision.deleteMany({ where: { siteId: { in: integrationSiteIds } } });
       await prisma.siteRetailPrice.deleteMany({ where: { siteId: { in: integrationSiteIds } } });
     }
@@ -634,5 +636,44 @@ describe('Contract v1 sync (PostgreSQL integration)', () => {
     });
     expect(branchBody.catalog.some((row) => row.id === kitchenTestProductId)).toBe(true);
     expect(branchBody.catalog.some((row) => row.id === kitchenTestIngredientId)).toBe(false);
+  });
+
+  it('delivers the next order before a recipe exists and settles the original receipt exactly once', async () => {
+    const worker = app.get(PendingManualDeductionsService);
+    await worker.onModuleDestroy(); // Drive retries deterministically in this test.
+    const { nextExpectedSequence } = await prisma.deviceSyncState.findUniqueOrThrow({ where: { deviceId } });
+    const recipe = await prisma.recipe.update({ where: { productItemId: transferItemId }, data: { active: false } });
+    const receiptId = randomUUID(), orderId = randomUUID();
+    const common = { schema_version: 1, occurred_at: '2026-09-27T12:00:00Z', dependencies: [] as string[] };
+    const receipt = { ...common, id: receiptId, event_type: 'manual_incoming.posted', device_sequence: nextExpectedSequence,
+      payload: { document_id: receiptId, shift_id: randomUUID(), site_id: siteId, location: 'SALEABLE', reason: 'fixture',
+        deduct_kitchen_ingredients: true, lines: [{ item_id: transferItemId, quantity_scaled: '2' }] } };
+    const order = { ...common, id: randomUUID(), event_type: 'kitchen_request.submitted', device_sequence: nextExpectedSequence + 1,
+      payload: { request_id: orderId, requesting_site_id: siteId, business_date: '2026-09-27', version: 1,
+        lines: [{ line_id: randomUUID(), item_id: transferItemId, requested_scaled: '2', quantity_scale: 1, name_snapshot: 'Fixture', unit_snapshot: 'pcs' }] } };
+    const events = [receipt, order].map(e => ({ ...e, content_hash: computeEventHash(e) }));
+    const push = () => request(app.getHttpServer()).post('/api/v1/sync/push').set({ 'x-device-id': deviceId, 'x-device-secret': deviceSecret })
+      .send({ contract_version: '1.0', stream_epoch: 1, events }).expect(200);
+    const branchStock = () => prisma.stockBalance.findUniqueOrThrow({ where: { siteId_itemId_location: { siteId, itemId: transferItemId, location: 'SALEABLE' } } });
+    const before = await branchStock();
+    await push();
+    await push();
+    expect((await branchStock()).quantityScaled).toBe(before.quantityScaled + 2n);
+    const pull = await request(app.getHttpServer()).get('/api/v1/sync/pull?limit=100')
+      .set({ 'x-device-id': kitchenDeviceId, 'x-device-secret': kitchenDeviceSecret }).expect(200);
+    expect((pull.body.events as { id: string }[]).some(e => e.id === order.id)).toBe(true);
+    await worker.processDue();
+    const movement = { sourceEventId: receiptId, kind: 'MANUAL_INCOMING_CONSUMPTION' };
+    expect(await prisma.ingredientStockTransaction.count({ where: movement })).toBe(0);
+    await prisma.recipe.update({ where: { id: recipe.id }, data: { active: true } });
+    await prisma.pendingManualDeduction.update({ where: { sourceEventId: receiptId }, data: { retryAt: new Date(0) } });
+    await worker.processDue();
+    await push();
+    await worker.processDue();
+    const ledger = await prisma.ingredientStockTransaction.findMany({ where: movement });
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0].quantityDeltaScaled).toBe(-4n);
+    expect(await prisma.pendingManualDeduction.count({ where: { sourceEventId: receiptId } })).toBe(0);
+    expect((await branchStock()).quantityScaled).toBe(before.quantityScaled + 2n);
   });
 });

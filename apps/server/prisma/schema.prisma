@@ -83,6 +83,7 @@ model Site {
   userRoles UserSiteRole[]
   enrollmentTokens EnrollmentToken[]
   kitchenEnrollment KitchenEnrollmentSetting?
+  pendingManualDeductions PendingManualDeduction[]
   syncEvents SyncEvent[]
   stockBalances StockBalance[]
   retailSales RetailSale[]
@@ -310,6 +311,7 @@ model DeviceSyncCursor {
 }
 
 model SyncEvent {
+  pendingManualDeduction PendingManualDeduction?
   id              String   @id @db.Uuid
   deviceId        String   @map("device_id") @db.Uuid
   siteId          String   @map("site_id") @db.Uuid
@@ -331,6 +333,17 @@ model SyncEvent {
   @@index([siteId, serverPosition])
   @@index([eventType, occurredAt])
   @@map("sync_events")
+}
+
+model PendingManualDeduction {
+  sourceEventId String @id @map("source_event_id") @db.Uuid
+  kitchenSiteId String @map("kitchen_site_id") @db.Uuid
+  retryAt DateTime @default(now()) @map("retry_at") @db.Timestamptz(6)
+  sourceEvent SyncEvent @relation(fields: [sourceEventId], references: [id], onDelete: Restrict)
+  kitchen Site @relation(fields: [kitchenSiteId], references: [id], onDelete: Restrict)
+
+  @@index([retryAt])
+  @@map("pending_manual_deductions")
 }
 
 model SiteRetailPrice {

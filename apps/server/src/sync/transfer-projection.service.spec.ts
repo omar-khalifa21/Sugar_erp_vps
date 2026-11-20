@@ -1,4 +1,3 @@
-import { HttpException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { DeviceProfile, StockLocation } from "@prisma/client";
 import { TransferProjectionService } from "./transfer-projection.service";
@@ -125,37 +124,18 @@ describe("TransferProjectionService manual incoming", () => {
     expect(stockUpsert).toHaveBeenCalledTimes(1);
   });
 
-  it("names the selected product and leaves both projections untouched when its recipe is missing", async () => {
-    const stockUpsert = jest.fn();
+  it("accepts branch stock and queues one ingredient deduction when the recipe is missing", async () => {
+    const create = jest.fn();
+    const upsert = jest.fn();
     const tx = {
-      item: {
-        findMany: jest
-          .fn()
-          .mockResolvedValueOnce([{ id: productId }])
-          .mockResolvedValueOnce([{ nameAr: "كيكة شوكولاتة" }]),
-      },
+      item: { findMany: jest.fn().mockResolvedValue([{ id: productId }]) },
       site: { findMany: jest.fn().mockResolvedValue([{ id: kitchenSiteId }]) },
       recipe: { findMany: jest.fn().mockResolvedValue([]) },
-      stockBalance: { upsert: stockUpsert },
+      pendingManualDeduction: { create },
+      stockBalance: { upsert },
     };
-
-    try {
-      await service.apply(
-        tx as never,
-        event(true),
-        branchSiteId,
-        DeviceProfile.BRANCH_TYPE_1,
-      );
-      throw new Error("Expected missing recipe validation to fail");
-    } catch (caught) {
-      expect(caught).toBeInstanceOf(HttpException);
-      const response: unknown = (caught as HttpException).getResponse();
-      expect(response).toEqual({
-        code: "RECIPE_REQUIRED",
-        message: "لا توجد وصفة فعالة للأصناف: كيكة شوكولاتة",
-        retryable: true,
-      });
-    }
-    expect(stockUpsert).not.toHaveBeenCalled();
+    await service.apply(tx as never, event(true), branchSiteId, DeviceProfile.BRANCH_TYPE_1);
+    expect(create).toHaveBeenCalledWith({ data: { sourceEventId: documentId, kitchenSiteId } });
+    expect(upsert).toHaveBeenCalledTimes(1);
   });
 });

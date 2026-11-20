@@ -19,4 +19,6 @@ The payload addition is backward compatible: an absent deduction flag is treated
 
 ## Operational consequence
 
+The missing-recipe behavior below was superseded by [ADR-0007](ADR-0007-deferred-manual-incoming-recipe.md).
+
 If a deduction-enabled offline event reaches the server before a selected product has an active recipe, or before Kitchen has sufficient ingredient stock, the whole server projection remains unapplied and retryable. The Branch device retains its already committed local document and outbox entry, surfaces the server's named validation message, and retries safely after the dependency is corrected.

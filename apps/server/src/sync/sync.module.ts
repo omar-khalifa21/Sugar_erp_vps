@@ -3,6 +3,7 @@ import { DeviceAuthService } from './device-auth.service';
 import { KitchenRequestReadController, SiteEventReadController, SyncController } from './sync.controller';
 import { SyncService } from './sync.service';
 import { TransferProjectionService } from './transfer-projection.service';
+import { PendingManualDeductionsService } from './pending-manual-deductions.service';
 
-@Module({ controllers: [SyncController, KitchenRequestReadController, SiteEventReadController], providers: [DeviceAuthService, SyncService, TransferProjectionService] })
+@Module({ controllers: [SyncController, KitchenRequestReadController, SiteEventReadController], providers: [DeviceAuthService, SyncService, TransferProjectionService, PendingManualDeductionsService] })
 export class SyncModule {}
